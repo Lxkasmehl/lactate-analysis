@@ -1,6 +1,7 @@
 """Render the structured JSON summary into a self-contained HTML report."""
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -228,7 +229,21 @@ def render(summary: dict, offline: bool = False) -> str:
     env.filters["certainty"] = format_certainty
     template = env.get_template("report.html.j2")
     sessions_latest_first = sorted(summary["fitness"]["sessions"], key=lambda s: s["date"], reverse=True)
-    return template.render(summary=summary, figs=figs_html, sessions=sessions_latest_first)
+    interactive = {
+        "planner": summary["fitness"]["planner"],
+        "heart_rate_planner": (summary.get("heart_rate") or {}).get("planner"),
+        "sessions": summary["fitness"]["sessions"],
+        "similar": summary["similar_sessions"],
+    }
+    # "</" inside inline JSON could close the <script> tag early.
+    interactive_json = json.dumps(interactive).replace("</", "<\\/")
+    return template.render(
+        summary=summary,
+        figs=figs_html,
+        sessions=sessions_latest_first,
+        interactive_json=interactive_json,
+        interactive_js=(TEMPLATE_DIR / "interactive.js").read_text(encoding="utf-8"),
+    )
 
 
 def write_report(summary: dict, output_path: str | Path, offline: bool = False) -> None:

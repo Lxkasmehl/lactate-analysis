@@ -74,6 +74,10 @@ STEEPNESS_PRIOR_LOG_SD = 0.2
 # number is mostly the literature prior.
 LEARNED_FROM_DATA_SD_RATIO = 0.7
 
+# Posterior draws exported for the in-browser workout planner (thinned to
+# keep the report small; enough for stable medians and 80% ranges).
+PLANNER_DRAWS = 400
+
 # Typical workout structures for the "target paces" table: (label, rep
 # distance m, rep duration s at threshold pace, rest s). Durations are
 # approximate; the rep-duration effect is logarithmic, so a few seconds off
@@ -154,6 +158,18 @@ FACTORS: list[Factor] = [
         "direction of the effect on lactate is debated.",
     ),
 ]
+
+
+def surface_group(surface: str | None, temperature: float | None) -> str:
+    """Coarse surface category used for session similarity and the planner."""
+    surface = surface or "Track"
+    if surface == "Treadmill":
+        return "Treadmill"
+    if "indoor" in surface.lower() or (surface == "Track" and (temperature is None or pd.isna(temperature))):
+        return "Indoor track"
+    if surface in OFFROAD_SURFACES:
+        return "Offroad"
+    return surface
 
 
 def _is_indoor(df: pd.DataFrame) -> pd.Series:
@@ -286,9 +302,14 @@ def build_model(model_df: pd.DataFrame, design: pd.DataFrame, shoes: pd.DataFram
         # Session-specific lactate drift over the session. Pace is steered by
         # lactate (slow down when it drifts up), so without this the drift
         # leaks into the pace-lactate relationship and flattens the curve.
+        # Drift may depend on where the session sits: experience says a
+        # session that runs high tends to keep climbing even when slowing
+        # down, while one that runs low can hold or even drop at the same
+        # pace. drift_vs_level > 0 means exactly that.
         drift_sd = pm.HalfNormal("drift_sd", sigma=0.3)
+        drift_vs_level = pm.Normal("drift_vs_level", 0.0, 0.5)
         drift_raw = pm.Normal("drift_raw", 0.0, 1.0, dims="session")
-        drift = drift_raw * drift_sd
+        drift = drift_vs_level * form + drift_raw * drift_sd
 
         effective_pace = pace - pm.math.dot(design.to_numpy(float), cost)
         if shoes.shape[1]:
@@ -338,7 +359,7 @@ def fit(df: pd.DataFrame, draws: int = 1000, tune: int = 1000, chains: int = 4, 
             cores=1,
         )
     max_rhat = float(
-        az.rhat(idata, var_names=["cost", "steepness", "baseline", "fitness", "form_sd", "drift_sd", "noise_sd"]
+        az.rhat(idata, var_names=["cost", "steepness", "baseline", "fitness", "form_sd", "drift_sd", "drift_vs_level", "noise_sd"]
                + (["shoe_effect"] if shoes.shape[1] else []))
         .to_dataset()
         .to_array()
@@ -372,6 +393,45 @@ def pace_offset_for_lactate(steepness: np.ndarray, baseline: np.ndarray, target_
     """s/km to add to the 2.0-mmol pace to get the pace at target_lactate
     (negative = faster), per posterior draw."""
     return -np.log((target_lactate - baseline) / (REFERENCE_LACTATE - baseline)) / steepness
+
+
+def _drift_vs_level(fit_result: FitnessFit) -> dict:
+    """Extra lactate rise per 10 min of reps for a session running one typical
+    day-to-day deviation above the trend, vs. one running at the trend."""
+    rho = _draws(fit_result, "drift_vs_level")
+    form_sd = _draws(fit_result, "form_sd")
+    extra_pct = 100 * (np.exp(rho * form_sd) - 1)
+    return {
+        "extra_rise_pct_per_10min": _rounded(extra_pct),
+        "prob_high_start_keeps_climbing": round(float(np.mean(rho > 0)), 2),
+    }
+
+
+def _planner_export(
+    fit_result: FitnessFit, fitness_now: np.ndarray, steepness: np.ndarray, baseline: np.ndarray, cost: np.ndarray
+) -> dict:
+    """Thinned posterior draws plus the constants the in-browser planner needs
+    to turn a described workout into per-rep target paces."""
+    idx = np.linspace(0, len(steepness) - 1, min(PLANNER_DRAWS, len(steepness))).astype(int)
+    shoes = fit_result.shoes
+    shoe_effects = _draws(fit_result, "shoe_effect")[idx] if shoes.shape[1] else np.zeros((len(idx), 0))
+    return {
+        "fitness_now": np.round(fitness_now[idx], 2).tolist(),
+        "steepness": np.round(steepness[idx], 5).tolist(),
+        "baseline": np.round(baseline[idx], 3).tolist(),
+        "factor_keys": [f.key for f in FACTORS],
+        "cost": np.round(cost[idx], 3).tolist(),
+        "shoe_names": list(shoes.columns),
+        "shoe_effects": np.round(shoe_effects, 3).tolist(),
+        "reference_lactate": REFERENCE_LACTATE,
+        "standard": {
+            "temperature_c": STANDARD_TEMPERATURE_C,
+            "humidity_pct": STANDARD_HUMIDITY_PCT,
+            "rep_time_s": STANDARD_REP_TIME_S,
+            "rest_fraction": STANDARD_REST_FRACTION,
+            "accumulated_work_min": STANDARD_ACCUMULATED_WORK_MIN,
+        },
+    }
 
 
 def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
@@ -429,6 +489,12 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
     for target in targets:
         normalized = effective + np.log(excess / (target - baseline[:, None])) / steepness[:, None]
         model_df[f"normalized_pace_{target}"] = np.median(normalized, axis=0)
+    # How much of each rep's normalized pace is condition correction vs.
+    # lactate-curve correction (normalized = pace - conditions + curve shift).
+    model_df["conditions_cost"] = np.median(pace[None, :] - effective, axis=0)
+    model_df["curve_shift"] = model_df[f"normalized_pace_{REFERENCE_LACTATE}"] - (
+        model_df["pace_s_per_km"] - model_df["conditions_cost"]
+    )
 
     session_codes, session_ids = pd.factorize(model_df["session_id"])
     # form > 0 means more lactate than the trend predicts (a worse day); as
@@ -446,6 +512,14 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
                 "workout_type": first.get("workout_type") if pd.notna(first.get("workout_type")) else None,
                 "surface": first.get("surface") if pd.notna(first.get("surface")) else None,
                 "rep_distance_m": float(first["rep_distance_m"]) if pd.notna(first.get("rep_distance_m")) else None,
+                "mean_rep_time_s": round(float(rows["rep_time_s"].mean()), 1),
+                "rest_s": float(rows["rest_duration_s"].fillna(DEFAULT_REST_S).mean()),
+                "surface_group": surface_group(
+                    first.get("surface") if pd.notna(first.get("surface")) else None, first.get("temperature_c")
+                ),
+                "temperature_c": float(first["temperature_c"]) if pd.notna(first.get("temperature_c")) else None,
+                "conditions_cost_s_per_km": round(float(rows["conditions_cost"].mean()), 1),
+                "curve_shift_s_per_km": round(float(rows["curve_shift"].mean()), 1),
                 "n_reps": int(len(rows)),
                 "mean_pace_s_per_km": round(float(rows["pace_s_per_km"].mean()), 1),
                 "mean_lactate": round(float(rows["lactate_mmol"].mean()), 2),
@@ -525,6 +599,8 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
             ),
         },
         "day_to_day_form_sd_s_per_km": round(float(np.median(_draws(fit_result, "form_sd") / steepness)), 1),
+        "drift_vs_level": _drift_vs_level(fit_result),
+        "planner": _planner_export(fit_result, fitness[:, last_week], steepness, baseline, cost),
         "diagnostics": {
             "n_reps": int(len(model_df)),
             "n_sessions": int(len(session_ids)),

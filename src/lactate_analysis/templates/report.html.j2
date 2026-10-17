@@ -35,6 +35,18 @@
   .pill { display: inline-block; font-size: 0.75rem; padding: 0.05rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
   ul { padding-left: 1.2rem; } li { margin-bottom: 0.35rem; }
   details summary { cursor: pointer; color: var(--text-2); }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.8rem 1rem; margin-bottom: 1rem; }
+  .form-grid label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--text-2); }
+  .form-grid .wide { grid-column: 1 / -1; }
+  .form-grid input[type=text], .form-grid input[type=number], .form-grid select, .picker {
+    font: inherit; font-size: 0.95rem; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text);
+  }
+  .form-grid .check { flex-direction: row; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: var(--text); }
+  .plan-summary { display: flex; flex-wrap: wrap; gap: 1rem 2.5rem; margin: 0.5rem 0 1rem; }
+  .plan-summary .label { color: var(--text-2); font-size: 0.8rem; }
+  .plan-summary .value { font-size: 1.35rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .plan-summary .sub { color: var(--text-3); font-size: 0.8rem; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -103,6 +115,33 @@
       </tr>
       {% endfor %}
     </table></div>
+  </section>
+
+  <section id="planner" class="card">
+    <h2>Plan a workout</h2>
+    <p class="note">
+      Describe the session and the target lactate; you get a pace (and treadmill speed) per rep. Later reps come out a
+      little slower because lactate drifts up over a session. Formats: <code>3x10min/60s</code>, <code>5x1000m/60s</code>,
+      <code>4x1600m/60s + 4x400m/30s</code>, <code>2x3km/90s</code>, <code>6x1mi/1min</code>.
+    </p>
+    <div class="form-grid">
+      <label class="wide">Workout<input id="pl-workout" type="text" value="3x10min/60s" autocomplete="off" spellcheck="false"></label>
+      <label>Target lactate (mmol/L)<input id="pl-lactate" type="number" step="0.1" min="1.2" max="6" value="2.0"></label>
+      <label>Where
+        <select id="pl-env">
+          <option>Track</option><option>Indoor track</option><option>Treadmill</option><option>Road</option><option>Grass / XC</option>
+        </select>
+      </label>
+      <label id="pl-incline-wrap" hidden>Treadmill incline (%)<input id="pl-incline" type="number" step="0.5" min="0" max="10" value="1"></label>
+      <span id="pl-outdoor-wrap" style="display: contents">
+        <label>Temperature (°C)<input id="pl-temp" type="number" step="1" value="15"></label>
+        <label>Humidity (%, optional)<input id="pl-humidity" type="number" step="5" min="0" max="100" placeholder="—"></label>
+      </span>
+      <label>Shoe<select id="pl-shoe"><option value="">Typical shoe</option></select></label>
+      <label class="check"><input id="pl-jog" type="checkbox"> Jogging rest</label>
+      <label class="check"><input id="pl-second" type="checkbox"> Second session today</label>
+    </div>
+    <div id="pl-output"></div>
   </section>
 
   <section>
@@ -200,12 +239,18 @@
       roughly {{ curve.lactate_drop_5s_slower_pct.median | round | int }}% with no change in fitness at all. The normalized
       pace in this report corrects for that.
     </p>
+    {% set dl = summary.fitness.drift_vs_level %}
+    <p class="note">
+      <strong>Starting high vs. starting low.</strong> In a session that runs one typical day-to-day deviation above your
+      trend, lactate climbs an extra {{ "%+.0f" | format(dl.extra_rise_pct_per_10min.median) }}% per 10 minutes of reps
+      (95%: {{ "%+.0f" | format(dl.extra_rise_pct_per_10min.lo95) }} to {{ "%+.0f" | format(dl.extra_rise_pct_per_10min.hi95) }}%)
+      compared with a session running at the trend; a session that runs low drifts correspondingly less.
+      {{ (dl.prob_high_start_keeps_climbing * 100) | round | int }}% probability that this "high stays high" pattern is real in your data.
+    </p>
     <p class="note">
       <strong>How sure is this?</strong> Because you steer pace by lactate, each workout type is run at almost the same
-      pace, so your data alone can't tell "steep curve, short reps much easier" apart from "flat curve, short reps a bit
-      easier" (both fit equally well). The steepness therefore leans on step-test values from the literature, which
-      also match your raw long-rep data. The cheapest way to make it truly yours is a mini step test inside a normal
-      session: e.g. three 1000 m reps deliberately about 5 s/km apart (slow → fast), lactate after each.
+      pace, so your data alone can't fully tell "steep curve, short reps much easier" apart from "flat curve, short reps
+      a bit easier". The steepness therefore leans on values from the literature, which also match your raw long-rep data.
     </p>
   </section>
 
@@ -223,6 +268,18 @@
     {{ figs.heart_rate | safe }}
   </section>
   {% endif %}
+
+  <section>
+    <h2>Compare with similar sessions</h2>
+    <p class="note">
+      Pick a session to see the earlier sessions most like it (rep length, rest, surface, time of day, temperature). The
+      columns add up: raw pace difference + conditions correction + lactate-curve correction = normalized difference.
+      Negative = the picked session was better. The smaller the two correction columns, the less the verdict depends on
+      the model.
+    </p>
+    <select id="sim-session" class="picker" aria-label="Session to compare"></select>
+    <div id="sim-output"></div>
+  </section>
 
   <section>
     <h2>Sessions</h2>
@@ -291,5 +348,7 @@
     </details>
   </section>
 </main>
+<script id="interactive-data" type="application/json">{{ interactive_json | safe }}</script>
+<script>{{ interactive_js | safe }}</script>
 </body>
 </html>

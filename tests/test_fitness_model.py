@@ -85,9 +85,13 @@ def test_detects_fitness_improvement(fitted):
 
 def test_recovers_treadmill_effect_and_slope(fitted):
     _, _, summary = fitted
-    treadmill = next(f for f in summary["factors"] if f["key"] == "treadmill")
-    assert treadmill["ci95"][0] < TRUE_TREADMILL_COST < treadmill["ci95"][1]
-    assert treadmill["learned_from_data"]
+    # Synthetic treadmill sessions are the only indoor ones, so only the sum
+    # of the indoor and treadmill effects is identifiable.
+    planner = summary["planner"]
+    keys = planner["factor_keys"]
+    combined = np.array([c[keys.index("indoor")] + c[keys.index("treadmill")] for c in planner["cost"]])
+    assert np.percentile(combined, 2.5) < TRUE_TREADMILL_COST < np.percentile(combined, 97.5)
+    assert combined.std() < 3.0
     true_gap = np.log((3.0 - TRUE_BASELINE) / (2.0 - TRUE_BASELINE)) / TRUE_STEEPNESS
     gap = summary["curve"]["s_per_km_2_to_3"]
     assert gap["lo95"] < true_gap < gap["hi95"]

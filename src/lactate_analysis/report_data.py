@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from .config import MAX_EFFORT_WORKOUT_TYPES
+from .similar_sessions import find_similar
 
 # Comparisons for the status tile: "now" vs. this many weeks earlier.
 COMPARISON_WEEKS = {"8 weeks ago": 8, "a year ago": 52}
@@ -143,6 +144,7 @@ def build_summary(
         "status": status,
         "cycles": _cycle_summaries(fitness_summary, cycle_defs),
         "fitness": public_fitness,
+        "similar_sessions": find_similar(public_fitness["sessions"], public_fitness["reference_lactate"]),
         "heart_rate": heart_rate_summary,
         "data_quality": {
             "fill_rates": validation_report["covariate_fill_rates"],

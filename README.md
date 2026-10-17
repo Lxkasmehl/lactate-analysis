@@ -28,7 +28,7 @@ effective_pace = pace - Σ cost_k * condition_k
   steered by lactate, each workout structure is run at nearly the same pace, so the data
   alone can't separate curve steepness from the rep-length effect (leave-one-out fit is
   identical either way). `c` therefore has a fairly tight literature prior (2 → 3 mmol/L
-  ≈ 8-12 s/km); a mini step test inside a session would make it data-driven.
+  ≈ 8-12 s/km).
 - **`cost_k`**: each condition as a pace cost in s/km (treadmill, road, offroad,
   incline, heat, rep number, rep duration, rest, jog rest, second session of the
   day). Each has a **literature-based prior**, so sparse factors still get a sensible,
@@ -62,6 +62,16 @@ python -m venv .venv
 3. Run `.venv\Scripts\lactate-report` (about a minute) and open `output/report.html`.
    `--offline` inlines Plotly so the file works without internet (e.g. to send to a coach).
 
+The report also contains two interactive tools that run entirely in the browser on
+posterior draws exported by the model (no server, no AI/API calls):
+
+- **Workout planner**: type e.g. `3x10min/60s` or `4x1600m/60s + 4x400m/30s`, pick target
+  lactate, surface (incl. treadmill incline), temperature, shoe, and get a per-rep pace,
+  treadmill speed (km/h, mph) and heart-rate guide with 80% ranges.
+- **Similar sessions**: for any session, the most similar earlier ones, with the
+  normalized difference split into raw pace + conditions correction + lactate-curve
+  correction, so you can see how much the verdict depends on the model.
+
 `output/report.json` holds the same results as structured data, the hand-off
 contract for a later web frontend or LLM explanation layer.
 
@@ -78,7 +88,7 @@ effect, and check that the model recovers both.
 
 - One lactate-curve shape for the whole period (only its position moves with fitness):
   the data cannot yet identify even one steepness, so a time-varying one would be pure
-  prior. Revisit once mini step tests exist (then: per-cycle steepness, partially pooled).
+  prior.
 - A large treadmill effect can partly be belt-speed calibration; the model can't tell
   the two apart.
 - Indoor sessions (treadmill, "Indoor ..." surfaces, track without a temperature) get a
@@ -104,6 +114,8 @@ src/lactate_analysis/
   fitness_model.py  the Bayesian normalization + fitness-trend model
   heart_rate_model.py  heart rate at 2.0/3.0 mmol/L per workout structure and over time
   report_data.py    status, cycle comparison, JSON summary
+  similar_sessions.py  nearest earlier sessions + decomposed comparison
   report_html.py    Plotly charts + Jinja template -> HTML
+  templates/interactive.js  in-browser workout planner + session comparison
   main.py           CLI entry point
 ```

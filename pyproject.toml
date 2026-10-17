@@ -29,4 +29,4 @@ lactate-report = "lactate_analysis.main:cli"
 where = ["src"]
 
 [tool.setuptools.package-data]
-lactate_analysis = ["templates/*.j2"]
+lactate_analysis = ["templates/*.j2", "templates/*.js"]

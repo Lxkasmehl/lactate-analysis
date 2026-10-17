@@ -133,7 +133,17 @@ def fit_and_summarize(df: pd.DataFrame, targets: list[float], draws: int = 1000,
     ]
 
     max_rhat = float(az.rhat(idata, var_names=["hr_at_2", "bpm_per_log_lactate", "rep_duration"]).to_dataset().to_array().max())
+    idx = np.linspace(0, len(k) - 1, min(400, len(k))).astype(int)
+    planner = {
+        "hr_at_2_now": np.round(hr_at_2_draws[idx, last_week], 1).tolist(),
+        "bpm_per_log_lactate": np.round(k[idx], 2).tolist(),
+        "rep_duration": np.round(rep_effect[idx], 2).tolist(),
+        "heat": np.round(draws_of("heat")[idx], 3).tolist(),
+        "treadmill": np.round(draws_of("treadmill")[idx], 2).tolist(),
+        "indoor": np.round(draws_of("indoor")[idx], 2).tolist(),
+    }
     return {
+        "planner": planner,
         "n_reps": int(len(model_df)),
         "structures": structures,
         "trend_at_2": trend,
