@@ -164,6 +164,31 @@
     </table></div>
   </section>
 
+  {% if summary.fitness.shoes %}
+  <section>
+    <h2>Which shoe is most efficient for you</h2>
+    <p class="note">
+      Each logged shoe compared with your typical shoe, in s/km at the same lactate (negative = more efficient).
+      Reps without a logged shoe count as your typical shoe, so they don't distort the comparison. Shoes with few reps
+      are pulled toward "typical" until there's enough data, which keeps one lucky session from crowning a winner.
+      Only {{ summary.fitness.n_reps_with_shoe }} reps have a shoe logged so far; every session you fill in sharpens this.
+    </p>
+    <div class="table-wrap"><table>
+      <tr><th>Shoe</th><th class="num">Sessions</th><th class="num">Reps</th><th class="num">vs. typical shoe</th><th class="num">95% range</th><th class="num">Chance it's your most efficient</th></tr>
+      {% for shoe in summary.fitness.shoes %}
+      <tr>
+        <td>{{ shoe.shoe }}</td>
+        <td class="num">{{ shoe.n_sessions }}</td>
+        <td class="num">{{ shoe.n_reps }}</td>
+        <td class="num">{{ shoe.median | signed_s }}</td>
+        <td class="num muted">{{ "%+.1f" | format(shoe.ci95[0]) }} to {{ "%+.1f" | format(shoe.ci95[1]) }}</td>
+        <td class="num">{{ (shoe.prob_most_efficient * 100) | round | int }}%</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+  </section>
+  {% endif %}
+
   <section>
     <h2>Your lactate curve</h2>
     {% set curve = summary.fitness.curve %}
@@ -235,14 +260,19 @@
       </li>
       {% if dq.outdoor_temperature_missing_sessions %}
       <li class="warn">
-        No temperature on {{ dq.outdoor_temperature_missing_sessions | length }} outdoor session(s):
+        No temperature on {{ dq.outdoor_temperature_missing_sessions | length }} outdoor (non-track) session(s):
         {{ dq.outdoor_temperature_missing_sessions | join(", ") }}. They were filled in with the average of your recorded
-        temperatures in the same month. If any of these were on an indoor track, set Surface to "Indoor Track" in the
-        sheet; otherwise adding the temperature makes them count fully.
+        temperatures in the same month; adding the temperature makes them count fully.
       </li>
       {% endif %}
-      <li>Treadmill and indoor sessions are assumed to be at {{ 18 }}°C with no humidity effect.</li>
-      <li>"Carbon super shoes" compares sessions where a super shoe is logged against sessions with no shoe logged, which may include super shoes too, so the true effect is probably a bit larger.</li>
+      {% if dq.assumed_indoor_track_sessions %}
+      <li>
+        Treated as indoor-track sessions because they're on the track with no temperature logged:
+        {{ dq.assumed_indoor_track_sessions | join(", ") }}. If one of them was actually outside, add its temperature
+        in the sheet and it will be treated as outdoor.
+      </li>
+      {% endif %}
+      <li>Indoor sessions get no heat or humidity correction; the "Indoors" factor learns the hall climate's net effect instead.</li>
       {% if dq.max_effort_rows_excluded %}
       <li>{{ dq.max_effort_rows_excluded }} rep(s) logged as {{ dq.max_effort_workout_types | join(", ") }} were left out: an all-out effort is a different physiological situation from threshold training.</li>
       {% endif %}

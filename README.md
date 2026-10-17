@@ -76,13 +76,17 @@ effect, and check that the model recovers both.
 
 ## Known limitations
 
-- One lactate-curve slope for the whole period: if the curve's *shape* changes with
-  fitness (not just its position), that's hidden.
+- One lactate-curve shape for the whole period (only its position moves with fitness):
+  the data cannot yet identify even one steepness, so a time-varying one would be pure
+  prior. Revisit once mini step tests exist (then: per-cycle steepness, partially pooled).
 - A large treadmill effect can partly be belt-speed calibration; the model can't tell
   the two apart.
-- Missing temperatures are imputed (treadmill / "Indoor ..." surfaces: 18°C, outdoor:
-  same-month average of recorded temperatures); the report lists outdoor sessions
-  without a temperature.
+- Indoor sessions (treadmill, "Indoor ..." surfaces, track without a temperature) get a
+  learned "indoors" offset instead of an assumed hall temperature. Missing outdoor
+  temperatures are imputed (same-month average of recorded temperatures); the report
+  lists the affected sessions.
+- Shoes are compared per logged shoe against your typical shoe (partially pooled);
+  reps without a logged shoe count as typical.
 - "Rep #" is read as the rep's position in the whole workout (lactate after reps 3, 6,
   9, ...), which is how the sheet is filled in.
 - Sampling runs chains sequentially with PyTensor's pure-Python backend

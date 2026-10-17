@@ -147,6 +147,7 @@ def build_summary(
         "data_quality": {
             "fill_rates": validation_report["covariate_fill_rates"],
             "outdoor_temperature_missing_sessions": public_fitness["diagnostics"]["outdoor_temperature_missing_sessions"],
+            "assumed_indoor_track_sessions": public_fitness["diagnostics"]["assumed_indoor_track_sessions"],
             "max_effort_rows_excluded": max_effort_rows,
             "max_effort_workout_types": MAX_EFFORT_WORKOUT_TYPES,
         },

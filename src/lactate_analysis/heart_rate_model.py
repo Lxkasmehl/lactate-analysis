@@ -10,7 +10,8 @@ Per rep i in session s, week w:
   k * log(1.5)).
 - Rep length matters for the *average* HR logged per rep: in short reps HR
   never reaches its plateau, so the logged average is lower at the same lactate.
-- Heat raises HR at the same effort (cardiovascular drift).
+- Heat raises HR at the same effort (cardiovascular drift); indoor sessions
+  get their own learned offset instead of an assumed hall temperature.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from .fitness_model import (
     STANDARD_TEMPERATURE_C,
     WORKOUT_STRUCTURES,
     _impute_temperature,
+    _is_indoor,
     prepare_model_frame,
 )
 
@@ -42,6 +44,7 @@ def _design(model_df: pd.DataFrame) -> dict[str, np.ndarray]:
         "rep_duration": np.log2(model_df["rep_time_s"].to_numpy(float) / STANDARD_REP_TIME_S),
         "heat": (temperature - STANDARD_TEMPERATURE_C).clip(lower=0.0).to_numpy(float),
         "treadmill": model_df["surface"].eq("Treadmill").to_numpy(float),
+        "indoor": _is_indoor(model_df).to_numpy(float),
     }
 
 
@@ -63,6 +66,7 @@ def fit_and_summarize(df: pd.DataFrame, targets: list[float], draws: int = 1000,
         rep_duration = pm.Normal("rep_duration", 3.0, 2.0)
         heat = pm.Normal("heat", 0.5, 0.3)
         treadmill = pm.Normal("treadmill", 0.0, 3.0)
+        indoor = pm.Normal("indoor", 0.0, 3.0)
         start = pm.Normal("start", float(np.median(hr)), 10.0)
         weekly_change_sd = pm.HalfNormal("weekly_change_sd", 1.0)
         steps = pm.Normal("steps", 0.0, 1.0, dims="week")
@@ -77,6 +81,7 @@ def fit_and_summarize(df: pd.DataFrame, targets: list[float], draws: int = 1000,
             + rep_duration * x["rep_duration"]
             + heat * x["heat"]
             + treadmill * x["treadmill"]
+            + indoor * x["indoor"]
             + session_raw[session_codes] * session_sd
         )
         noise_sd = pm.HalfNormal("noise_sd", 4.0)

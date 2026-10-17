@@ -50,15 +50,13 @@ STANDARD_HUMIDITY_PCT = 50.0
 STANDARD_REP_TIME_S = 300.0
 STANDARD_REST_FRACTION = 60.0 / (300.0 + 60.0)
 STANDARD_ACCUMULATED_WORK_MIN = 15.0
-INDOOR_TEMPERATURE_C = 18.0
 DEFAULT_REST_S = 60.0
 OFFROAD_SURFACES = {"Grass / Turf", "Dirtroad", "XC", "Trail", "Grass"}
-# Carbon-plate "super shoes"; matched case-insensitively as substrings of the
-# Shoes column.
-SUPER_SHOE_KEYWORDS = [
-    "vaporfly", "alphafly", "cloudboom echo", "metaspeed", "adios pro", "endorphin pro",
-    "endorphin elite", "rocket x", "fast-r", "sc elite", "carbon x", "deviate elite", "hyperion elite",
-]
+# Prior spread of how much individual shoes differ from your typical shoe
+# (s/km). Carbon "super shoes" vs. ordinary trainers differ by ~4-6 s/km at
+# threshold pace (Hoogkamer et al. 2018: ~4% running economy), different
+# super shoes from each other by less.
+SHOE_EFFECT_PRIOR_SD = 3.0
 
 # Prior for the steepness of the exponential part of the curve (per s/km
 # faster), putting 2 -> 3 mmol/L at roughly 8-12 s/km as in step tests of
@@ -115,9 +113,15 @@ FACTORS: list[Factor] = [
         "Lactate drifts up over a session even at constant pace as fatigue builds.",
     ),
     Factor(
-        "treadmill", "Treadmill (vs. track)", "on/off", -5.0, 4.0,
+        "indoor", "Indoors (hall or treadmill)", "on/off", 0.0, 4.0,
+        "Indoors there's no wind or weather, but halls and gyms are often warm and dry. The model "
+        "learns the net effect instead of assuming an indoor temperature. Track sessions without a "
+        "temperature are treated as indoor-track sessions.",
+    ),
+    Factor(
+        "treadmill", "Treadmill (vs. running indoors)", "on/off", -5.0, 4.0,
         "No air resistance and a moving belt: at 0% incline the treadmill is easier than "
-        "outdoors (Jones & Doust 1996 recommend 1% incline to match).",
+        "running over ground (Jones & Doust 1996 recommend 1% incline to match).",
     ),
     Factor(
         "road", "Road (vs. track)", "on/off", 0.0, 3.0,
@@ -141,11 +145,6 @@ FACTORS: list[Factor] = [
         "Humid air makes sweat evaporate less, so the body heats up faster -- mostly relevant on warm days.",
     ),
     Factor(
-        "super_shoes", "Carbon super shoes (vs. not recorded)", "on/off", -5.0, 3.0,
-        "Carbon-plated shoes improve running economy by ~4% (Hoogkamer et al. 2018), roughly "
-        "2-3% faster at the same effort.",
-    ),
-    Factor(
         "jog_rest", "Jog/float rest (vs. standing)", "on/off", 0.0, 3.0,
         "Active recovery clears lactate faster but keeps working; net effect unclear.",
     ),
@@ -158,28 +157,38 @@ FACTORS: list[Factor] = [
 
 
 def _is_indoor(df: pd.DataFrame) -> pd.Series:
+    """Treadmill, any surface containing "indoor", or a track session without a
+    temperature (an indoor track: temperature is only logged outdoors)."""
     surface = df["surface"].fillna("")
-    return surface.eq("Treadmill") | surface.str.contains("indoor", case=False)
+    no_temperature = df["temperature_c"].isna()
+    return (
+        surface.eq("Treadmill")
+        | surface.str.contains("indoor", case=False)
+        | (surface.eq("Track") & no_temperature)
+    )
 
 
 def _impute_temperature(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-    """Fill missing temperatures: indoor -> room temperature (expected, not a
-    gap), outdoor -> mean recorded temperature in the same calendar month,
-    else overall mean. Returns (temperature, outdoor_value_was_missing)."""
+    """Temperature for the heat factor. Indoor rows get the standard
+    temperature (no heat effect; the indoor factor covers the hall climate).
+    Missing outdoor values -> mean recorded temperature in the same calendar
+    month, else overall mean. Returns (temperature, outdoor_value_was_missing)."""
     temp = df["temperature_c"].astype(float)
     indoor = _is_indoor(df)
     month_mean = temp.where(~indoor).groupby(df["date"].dt.month).transform("mean")
     overall = temp.mean() if temp.notna().any() else STANDARD_TEMPERATURE_C
     filled = temp.copy()
-    filled[temp.isna() & indoor] = INDOOR_TEMPERATURE_C
+    filled[indoor] = STANDARD_TEMPERATURE_C
     outdoor_missing = temp.isna() & ~indoor
     filled[outdoor_missing] = month_mean[outdoor_missing].fillna(overall)
     return filled, outdoor_missing
 
 
-def _is_super_shoe(shoes: pd.Series) -> pd.Series:
-    lowered = shoes.fillna("").str.lower()
-    return lowered.apply(lambda s: any(k in s for k in SUPER_SHOE_KEYWORDS))
+def build_shoe_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """One-hot matrix of logged shoes. A rep without a logged shoe is all-zero,
+    i.e. counted as your typical shoe -- not as a separate "unknown" shoe."""
+    shoes = df["shoes"].astype("string").str.strip().replace("", pd.NA)
+    return pd.get_dummies(shoes, dtype=float).reindex(df.index, fill_value=0.0)
 
 
 def build_design(df: pd.DataFrame) -> pd.DataFrame:
@@ -199,13 +208,13 @@ def build_design(df: pd.DataFrame) -> pd.DataFrame:
     design["rep_duration"] = np.log2(rep_time / STANDARD_REP_TIME_S)
     design["rest_fraction"] = (rest_s / (rep_time + rest_s) - STANDARD_REST_FRACTION) * 10.0
     design["accumulated_work"] = (accumulated_min - STANDARD_ACCUMULATED_WORK_MIN) / 10.0
+    design["indoor"] = indoor.astype(float)
     design["treadmill"] = surface.eq("Treadmill").astype(float)
     design["road"] = surface.eq("Road").astype(float)
     design["offroad"] = surface.isin(OFFROAD_SURFACES).astype(float)
     design["incline"] = df["incline_pct"].astype(float).fillna(0.0) * design["treadmill"]
     design["heat"] = (temperature - STANDARD_TEMPERATURE_C).clip(lower=0.0)
     design["humidity"] = ((humidity - STANDARD_HUMIDITY_PCT).clip(lower=0.0) / 10.0).fillna(0.0)
-    design["super_shoes"] = _is_super_shoe(df["shoes"]).astype(float)
     design["jog_rest"] = rest_type.isin(["Jog", "Float"]).astype(float)
     design["second_session"] = df["had_earlier_session_today"].astype(float)
     return design[[f.key for f in FACTORS]]
@@ -237,7 +246,7 @@ def prepare_model_frame(df: pd.DataFrame) -> pd.DataFrame:
     return model_df
 
 
-def build_model(model_df: pd.DataFrame, design: pd.DataFrame) -> pm.Model:
+def build_model(model_df: pd.DataFrame, design: pd.DataFrame, shoes: pd.DataFrame) -> pm.Model:
     n_weeks = int(model_df["week_idx"].max()) + 1
     session_codes, session_ids = pd.factorize(model_df["session_id"])
     prior_means = np.array([f.prior_mean for f in FACTORS])
@@ -247,7 +256,12 @@ def build_model(model_df: pd.DataFrame, design: pd.DataFrame) -> pm.Model:
     lactate = model_df["lactate_mmol"].to_numpy(float)
     start_guess = float(np.median(pace[(lactate > 1.5) & (lactate < 2.5)])) if ((lactate > 1.5) & (lactate < 2.5)).any() else float(np.median(pace))
 
-    coords = {"week": np.arange(n_weeks), "session": session_ids, "factor": [f.key for f in FACTORS]}
+    coords = {
+        "week": np.arange(n_weeks),
+        "session": session_ids,
+        "factor": [f.key for f in FACTORS],
+        "shoe": list(shoes.columns),
+    }
     with pm.Model(coords=coords) as model:
         cost = pm.Normal("cost", mu=prior_means, sigma=prior_sds, dims="factor")
         log_steepness = pm.Normal("log_steepness", mu=np.log(STEEPNESS_PRIOR_MEDIAN), sigma=STEEPNESS_PRIOR_LOG_SD)
@@ -277,6 +291,13 @@ def build_model(model_df: pd.DataFrame, design: pd.DataFrame) -> pm.Model:
         drift = drift_raw * drift_sd
 
         effective_pace = pace - pm.math.dot(design.to_numpy(float), cost)
+        if shoes.shape[1]:
+            # Each logged shoe vs. your typical shoe, partially pooled: a shoe
+            # with few reps stays close to "typical" until data says otherwise.
+            shoe_sd = pm.HalfNormal("shoe_sd", sigma=SHOE_EFFECT_PRIOR_SD)
+            shoe_raw = pm.Normal("shoe_raw", 0.0, 1.0, dims="shoe")
+            shoe_effect = pm.Deterministic("shoe_effect", shoe_raw * shoe_sd, dims="shoe")
+            effective_pace = effective_pace - pm.math.dot(shoes.to_numpy(float), shoe_effect)
         exponent = (
             steepness * (fitness[model_df["week_idx"].to_numpy()] - effective_pace)
             + form[session_codes]
@@ -292,6 +313,7 @@ def build_model(model_df: pd.DataFrame, design: pd.DataFrame) -> pm.Model:
 class FitnessFit:
     model_df: pd.DataFrame
     design: pd.DataFrame
+    shoes: pd.DataFrame
     idata: object
     n_divergences: int
     max_rhat: float
@@ -300,7 +322,8 @@ class FitnessFit:
 def fit(df: pd.DataFrame, draws: int = 1000, tune: int = 1000, chains: int = 4, seed: int = 0) -> FitnessFit:
     model_df = prepare_model_frame(df)
     design = build_design(model_df)
-    model = build_model(model_df, design)
+    shoes = build_shoe_matrix(model_df)
+    model = build_model(model_df, design, shoes)
     with model:
         idata = pm.sample(
             draws=draws,
@@ -315,13 +338,14 @@ def fit(df: pd.DataFrame, draws: int = 1000, tune: int = 1000, chains: int = 4, 
             cores=1,
         )
     max_rhat = float(
-        az.rhat(idata, var_names=["cost", "steepness", "baseline", "fitness", "form_sd", "drift_sd", "noise_sd"])
+        az.rhat(idata, var_names=["cost", "steepness", "baseline", "fitness", "form_sd", "drift_sd", "noise_sd"]
+               + (["shoe_effect"] if shoes.shape[1] else []))
         .to_dataset()
         .to_array()
         .max()
     )
     n_divergences = int(idata.sample_stats["diverging"].to_numpy().sum())
-    return FitnessFit(model_df, design, idata, n_divergences, max_rhat)
+    return FitnessFit(model_df, design, shoes, idata, n_divergences, max_rhat)
 
 
 def _draws(fit_result: FitnessFit, name: str) -> np.ndarray:
@@ -397,6 +421,10 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
     pace = model_df["pace_s_per_km"].to_numpy(float)
     lactate = model_df["lactate_mmol"].to_numpy(float)
     effective = pace[None, :] - cost @ design.to_numpy(float).T
+    shoes = fit_result.shoes
+    if shoes.shape[1]:
+        shoe_effect = _draws(fit_result, "shoe_effect")
+        effective = effective - shoe_effect @ shoes.to_numpy(float).T
     excess = np.maximum(lactate[None, :] - baseline[:, None], 0.05)
     for target in targets:
         normalized = effective + np.log(excess / (target - baseline[:, None])) / steepness[:, None]
@@ -447,6 +475,31 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
             }
         )
 
+    shoe_summary = []
+    if shoes.shape[1]:
+        is_best = shoe_effect == shoe_effect.min(axis=1, keepdims=True)
+        for j, name in enumerate(shoes.columns):
+            worn = shoes[name].gt(0)
+            shoe_summary.append(
+                {
+                    "shoe": name,
+                    "n_reps": int(worn.sum()),
+                    "n_sessions": int(model_df.loc[worn, "session_id"].nunique()),
+                    "median": round(float(np.median(shoe_effect[:, j])), 1),
+                    "ci95": [
+                        round(float(np.percentile(shoe_effect[:, j], 2.5)), 1),
+                        round(float(np.percentile(shoe_effect[:, j], 97.5)), 1),
+                    ],
+                    "prob_most_efficient": round(float(is_best[:, j].mean()), 2),
+                }
+            )
+        shoe_summary.sort(key=lambda s: s["median"])
+
+    assumed_indoor_track = model_df[model_df["surface"].eq("Track") & model_df["temperature_c"].isna()]
+    assumed_indoor_sessions = [
+        f"{row.date.date()} {row.session_period}"
+        for row in assumed_indoor_track.drop_duplicates("session_id").sort_values("date").itertuples()
+    ]
     _, outdoor_temp_missing = _impute_temperature(model_df)
     missing_temp_rows = model_df.loc[outdoor_temp_missing].drop_duplicates("session_id").sort_values("date")
     missing_temp_sessions = [
@@ -460,6 +513,8 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
         "structures": structures,
         "sessions": sessions,
         "factors": factors,
+        "shoes": shoe_summary,
+        "n_reps_with_shoe": int(shoes.sum(axis=1).gt(0).sum()) if shoes.shape[1] else 0,
         "curve": {
             "baseline_mmol": _rounded(baseline, 2),
             "steepness_learned_from_data": float(np.log(steepness).std())
@@ -474,6 +529,7 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
             "n_reps": int(len(model_df)),
             "n_sessions": int(len(session_ids)),
             "outdoor_temperature_missing_sessions": missing_temp_sessions,
+            "assumed_indoor_track_sessions": assumed_indoor_sessions,
             "n_divergences": fit_result.n_divergences,
             "max_rhat": round(fit_result.max_rhat, 3),
             "converged": fit_result.max_rhat <= 1.05 and fit_result.n_divergences == 0,

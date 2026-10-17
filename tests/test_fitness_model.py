@@ -58,7 +58,7 @@ def _make_synthetic_df(n_weeks: int = 40, seed: int = 0) -> pd.DataFrame:
                         "incline_pct": 0.0 if treadmill else np.nan,
                         "temperature_c": 12.0,
                         "humidity_pct": np.nan,
-                        "shoes": np.nan,
+                        "shoes": "Fast Shoe" if (week % 4 == 0 and period == "AM") else np.nan,
                         "heart_rate": 160 + 15 * log_lac - 15 * np.log(2.0) + rng.normal(0, 2),
                         "had_earlier_session_today": period == "PM",
                         "workout_type": "Double Threshold - Long Reps",
