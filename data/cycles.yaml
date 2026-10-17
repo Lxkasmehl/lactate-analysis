@@ -1,0 +1,16 @@
+# Fill in the real start/end dates of your training cycles (Formaufbauten).
+# end_date: null means "open-ended" (still ongoing) -- use that for your
+# current, most recent cycle.
+cycles:
+  - id: cycle_1
+    label: "XC 2025"
+    start_date: 2025-05-15
+    end_date: 2025-11-24
+  - id: cycle_2
+    label: "Track 2026"
+    start_date: 2025-11-25
+    end_date: 2026-05-11
+  - id: cycle_3
+    label: "XC 2026"
+    start_date: 2026-05-25
+    end_date: null
