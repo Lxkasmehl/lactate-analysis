@@ -16,26 +16,33 @@ The model (`fitness_model.py`, Bayesian, PyMC) normalizes every rep to a common
 standard:
 
 ```
-log(lactate) = log(2.0) + slope * (effective_pace - fitness[week]) + day_form[session] + noise
+lactate = L0 + (2.0 - L0) * exp(c * (fitness[week] - effective_pace) + day_form[session] + drift[session] * work_done)
 effective_pace = pace - Σ cost_k * condition_k
 ```
 
 - **`fitness[week]`**: pace (s/km) at exactly 2.0 mmol/L under standard conditions,
   as a weekly random walk. Every session informs its neighbours; gaps just widen the
   uncertainty. No manual cycle boundaries are needed to see the trend.
-- **`slope`**: your own lactate curve (≈2% more lactate per s/km faster), learned
-  mainly from pace changes within sessions and between AM/PM sessions on the same
-  day. It converts any (pace, lactate) pair into the pace at 2.0 or 3.0 mmol/L.
+- **`L0`, `c`**: your lactate curve, a resting baseline plus an exponential part. It
+  converts any (pace, lactate) pair into the pace at 2.0 or 3.0 mmol/L. Because pace is
+  steered by lactate, each workout structure is run at nearly the same pace, so the data
+  alone can't separate curve steepness from the rep-length effect (leave-one-out fit is
+  identical either way). `c` therefore has a fairly tight literature prior (2 → 3 mmol/L
+  ≈ 8-12 s/km); a mini step test inside a session would make it data-driven.
 - **`cost_k`**: each condition as a pace cost in s/km (treadmill, road, offroad,
   incline, heat, rep number, rep duration, rest, jog rest, second session of the
   day). Each has a **literature-based prior**, so sparse factors still get a sensible,
   honestly uncertain estimate instead of being dropped or overfit. The report shows
   prior vs. estimate, so you see where your data taught the model something.
-- **`day_form`**: how a single session deviated from the trend (sleep, fatigue,
-  measurement noise), kept separate so it doesn't masquerade as a fitness change.
+- **`day_form`, `drift`**: how a single session deviated from the trend (sleep, fatigue,
+  measurement noise) and how fast its lactate drifted up, kept separate so neither
+  masquerades as a fitness change.
 
-Heart rate is deliberately not a factor: it's a consequence of intensity, not a
-condition. 4.0 mmol/L isn't reported because training data almost never reaches it.
+The report turns this into target paces per workout structure (400 m / 30 s, 1000 m,
+mile, 10 min). `heart_rate_model.py` adds the heart rate that goes with 2.0/3.0 mmol/L
+per structure and over time, for sessions without a lactate meter. Heart rate is not
+used to normalize lactate: it's a consequence of intensity, not a condition.
+4.0 mmol/L isn't reported because training data almost never reaches it.
 
 ## Setup
 
@@ -73,8 +80,11 @@ effect, and check that the model recovers both.
   fitness (not just its position), that's hidden.
 - A large treadmill effect can partly be belt-speed calibration; the model can't tell
   the two apart.
-- Missing temperatures are imputed (treadmill: 18°C, outdoor: same-month average of
-  recorded temperatures).
+- Missing temperatures are imputed (treadmill / "Indoor ..." surfaces: 18°C, outdoor:
+  same-month average of recorded temperatures); the report lists outdoor sessions
+  without a temperature.
+- "Rep #" is read as the rep's position in the whole workout (lactate after reps 3, 6,
+  9, ...), which is how the sheet is filled in.
 - Sampling runs chains sequentially with PyTensor's pure-Python backend
   (`PYTENSOR_FLAGS=cxx=`): parallel chains and the Numba backend hung on Windows here.
 
@@ -88,6 +98,7 @@ src/lactate_analysis/
   features.py       derived columns (pace, second session of the day, ...)
   validation.py     column fill rates for the data-quality section
   fitness_model.py  the Bayesian normalization + fitness-trend model
+  heart_rate_model.py  heart rate at 2.0/3.0 mmol/L per workout structure and over time
   report_data.py    status, cycle comparison, JSON summary
   report_html.py    Plotly charts + Jinja template -> HTML
   main.py           CLI entry point

@@ -2,30 +2,33 @@
 
 The model, per rep i in session s, week w:
 
-    log(lactate_i) = log(L_ref) + b * (effective_pace_i - fitness_w) + form_s + noise
+    lactate_i = L0 + (2.0 - L0) * exp(c * (fitness_w - effective_pace_i) + form_s)   (x noise)
 
-- ``fitness_w`` is the pace (s/km) that produces exactly L_ref (2.0 mmol/L)
-  under standard conditions in week w. It follows a weekly random walk, so
-  every session informs its neighbours and gaps simply widen the
-  uncertainty -- no manual cycle boundaries are needed to see a trend.
-- ``b`` (< 0) is the local slope of the exponential lactate curve: how much
-  log-lactate rises per s/km faster. It is identified mostly from pace
-  changes *within* a session and between same-day AM/PM sessions, which is
-  why it can be estimated well even though the overall pace range is narrow.
-  It is what turns "slightly slower but much lower lactate" into a fair
-  comparison instead of the misleading lactate/speed ratio.
+- ``L0`` is the resting/baseline lactate (~0.8-1 mmol/L). The classic
+  lactate curve is baseline + exponential, not a pure exponential: without
+  the baseline the step from 2 to 3 mmol/L comes out far too large, because
+  a pure log curve treats 1.5 -> 2.0 and 2.0 -> 3.0 alike.
+- ``fitness_w`` is the pace (s/km) that produces exactly 2.0 mmol/L under
+  standard conditions in week w, as a weekly random walk: every session
+  informs its neighbours and gaps simply widen the uncertainty.
+- ``c`` is the steepness of the exponential part, learned from your data
+  with a literature prior (trained runners go from 2 to 4 mmol/L over ~1-1.5
+  km/h in a step test). It turns "slightly slower but much lower lactate"
+  into a fair comparison instead of the misleading lactate/speed ratio.
 - ``effective_pace_i = pace_i - sum_k cost_k * x_ik``: every condition
-  (heat, treadmill, rep length, rest, ...) is expressed as a pace cost in
-  s/km (positive = makes the rep harder, i.e. like running that much
-  faster). Each cost has a literature-based prior, so a sparsely observed
-  condition still contributes a sensible, appropriately uncertain number
-  instead of being dropped or overfit.
+  (heat, treadmill, rep length, work:rest, ...) is a pace cost in s/km
+  (positive = makes the rep harder, like running that much faster). Each
+  cost has a literature-based prior, so a sparsely observed condition still
+  contributes a sensible, honestly uncertain number instead of being
+  dropped or overfit.
 - ``form_s`` is the day-to-day deviation of one session (sleep, fatigue,
-  nutrition, measurement noise) that the trend shouldn't absorb.
+  nutrition, measurement noise) that the trend shouldn't absorb, and each
+  session also gets its own lactate drift over accumulated work: because
+  pace is steered by lactate (slow down when it drifts up), a shared drift
+  would let that feedback flatten the estimated curve.
 
-Heart rate is deliberately *not* a covariate: it is a consequence of
-intensity, not a condition, and controlling for it would remove part of the
-fitness signal itself.
+Heart rate is not a condition here (it's a consequence of intensity); it
+gets its own model in heart_rate_model.py.
 """
 from __future__ import annotations
 
@@ -43,15 +46,46 @@ from . import config
 
 REFERENCE_LACTATE = 2.0
 STANDARD_TEMPERATURE_C = 15.0
-STANDARD_REST_S = 60.0
+STANDARD_HUMIDITY_PCT = 50.0
 STANDARD_REP_TIME_S = 300.0
-TREADMILL_DEFAULT_TEMPERATURE_C = 18.0
+STANDARD_REST_FRACTION = 60.0 / (300.0 + 60.0)
+STANDARD_ACCUMULATED_WORK_MIN = 15.0
+INDOOR_TEMPERATURE_C = 18.0
+DEFAULT_REST_S = 60.0
 OFFROAD_SURFACES = {"Grass / Turf", "Dirtroad", "XC", "Trail", "Grass"}
+# Carbon-plate "super shoes"; matched case-insensitively as substrings of the
+# Shoes column.
+SUPER_SHOE_KEYWORDS = [
+    "vaporfly", "alphafly", "cloudboom echo", "metaspeed", "adios pro", "endorphin pro",
+    "endorphin elite", "rocket x", "fast-r", "sc elite", "carbon x", "deviate elite", "hyperion elite",
+]
+
+# Prior for the steepness of the exponential part of the curve (per s/km
+# faster), putting 2 -> 3 mmol/L at roughly 8-12 s/km as in step tests of
+# trained runners. Deliberately fairly tight: lactate-guided training keeps
+# pace within each workout structure almost constant, so the data can't
+# separate "steep curve + big rep-length effect" from "flat curve + small
+# rep-length effect" (leave-one-out fit was identical for both on the real
+# data). A wide prior let the flat solution win by accident and produced
+# 3.0 mmol/L paces ~10 s/km faster than the raw long-rep data supports.
+STEEPNESS_PRIOR_MEDIAN = 0.085
+STEEPNESS_PRIOR_LOG_SD = 0.2
 
 # A factor counts as "learned from your data" once the data has narrowed its
 # uncertainty to at most this fraction of the prior's; above it, the reported
 # number is mostly the literature prior.
 LEARNED_FROM_DATA_SD_RATIO = 0.7
+
+# Typical workout structures for the "target paces" table: (label, rep
+# distance m, rep duration s at threshold pace, rest s). Durations are
+# approximate; the rep-duration effect is logarithmic, so a few seconds off
+# barely matters.
+WORKOUT_STRUCTURES = [
+    ("400 m reps, 30 s rest", 400, 72.0, 30.0),
+    ("1000 m reps, 60 s rest", 1000, 185.0, 60.0),
+    ("1 mile reps, 60 s rest", 1609, 310.0, 60.0),
+    ("10 min reps, 60 s rest", None, 600.0, 60.0),
+]
 
 
 @dataclass(frozen=True)
@@ -65,6 +99,21 @@ class Factor:
 
 
 FACTORS: list[Factor] = [
+    Factor(
+        "rep_duration", "Longer reps", "per doubling of rep duration (vs. 5 min)", 6.0, 3.0,
+        "In short reps, oxygen stored in muscle and creatine phosphate cover part of each bout, so "
+        "less lactate is produced at the same pace. That's why 400s can be run much faster than "
+        "miles at the same lactate.",
+    ),
+    Factor(
+        "rest_fraction", "More rest relative to work", "per +10% of time spent resting", -4.0, 3.0,
+        "A larger share of rest (e.g. 400 m / 30 s vs. mile / 60 s) gives lactate more time to clear "
+        "between reps.",
+    ),
+    Factor(
+        "accumulated_work", "Later in the session", "per 10 min of reps already run (vs. 15 min)", 2.0, 2.0,
+        "Lactate drifts up over a session even at constant pace as fatigue builds.",
+    ),
     Factor(
         "treadmill", "Treadmill (vs. track)", "on/off", -5.0, 4.0,
         "No air resistance and a moving belt: at 0% incline the treadmill is easier than "
@@ -88,17 +137,13 @@ FACTORS: list[Factor] = [
         "performance drops ~0.3-0.4% per °C above ~15°C (Ely et al. 2007).",
     ),
     Factor(
-        "rep_index", "Later rep in the session", "per rep", 1.0, 2.0,
-        "Lactate tends to accumulate over a session even at constant pace.",
+        "humidity", "Humidity", f"per +10% above {STANDARD_HUMIDITY_PCT:.0f}% (outdoors)", 1.0, 1.0,
+        "Humid air makes sweat evaporate less, so the body heats up faster -- mostly relevant on warm days.",
     ),
     Factor(
-        "rep_duration", "Longer reps", "per doubling of rep duration", 4.0, 4.0,
-        "Longer continuous efforts produce more lactate at the same pace -- why short reps are "
-        "run faster than long reps at the same lactate target.",
-    ),
-    Factor(
-        "rest", "Longer rest between reps", f"per extra minute (vs. {STANDARD_REST_S:.0f}s)", -2.0, 3.0,
-        "More recovery lets lactate clear before the next rep.",
+        "super_shoes", "Carbon super shoes (vs. not recorded)", "on/off", -5.0, 3.0,
+        "Carbon-plated shoes improve running economy by ~4% (Hoogkamer et al. 2018), roughly "
+        "2-3% faster at the same effort.",
     ),
     Factor(
         "jog_rest", "Jog/float rest (vs. standing)", "on/off", 0.0, 3.0,
@@ -112,43 +157,67 @@ FACTORS: list[Factor] = [
 ]
 
 
+def _is_indoor(df: pd.DataFrame) -> pd.Series:
+    surface = df["surface"].fillna("")
+    return surface.eq("Treadmill") | surface.str.contains("indoor", case=False)
+
+
 def _impute_temperature(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-    """Fill missing temperatures: indoor (treadmill) -> typical room temperature,
-    outdoor -> the mean of recorded temperatures in the same calendar month
-    (seasonal), else the overall mean. Returns (temperature, was_imputed)."""
+    """Fill missing temperatures: indoor -> room temperature (expected, not a
+    gap), outdoor -> mean recorded temperature in the same calendar month,
+    else overall mean. Returns (temperature, outdoor_value_was_missing)."""
     temp = df["temperature_c"].astype(float)
-    imputed = temp.isna()
-    month = df["date"].dt.month
-    month_mean = temp.groupby(month).transform("mean")
+    indoor = _is_indoor(df)
+    month_mean = temp.where(~indoor).groupby(df["date"].dt.month).transform("mean")
     overall = temp.mean() if temp.notna().any() else STANDARD_TEMPERATURE_C
-    is_treadmill = df["surface"].eq("Treadmill")
     filled = temp.copy()
-    filled[imputed & is_treadmill] = TREADMILL_DEFAULT_TEMPERATURE_C
-    rest = imputed & ~is_treadmill
-    filled[rest] = month_mean[rest].fillna(overall)
-    return filled, imputed
+    filled[temp.isna() & indoor] = INDOOR_TEMPERATURE_C
+    outdoor_missing = temp.isna() & ~indoor
+    filled[outdoor_missing] = month_mean[outdoor_missing].fillna(overall)
+    return filled, outdoor_missing
+
+
+def _is_super_shoe(shoes: pd.Series) -> pd.Series:
+    lowered = shoes.fillna("").str.lower()
+    return lowered.apply(lambda s: any(k in s for k in SUPER_SHOE_KEYWORDS))
 
 
 def build_design(df: pd.DataFrame) -> pd.DataFrame:
     """Condition matrix (one column per Factor, standard conditions = 0)."""
     surface = df["surface"].fillna("Track")
+    indoor = _is_indoor(df)
     temperature, _ = _impute_temperature(df)
-    rest_s = df["rest_duration_s"].astype(float).fillna(STANDARD_REST_S)
+    rest_s = df["rest_duration_s"].astype(float).fillna(DEFAULT_REST_S)
     rest_type = df["rest_type"].fillna("Stand")
     rep_time = df["rep_time_s"].astype(float)
+    # "Rep #" in the log is the rep's position in the whole workout (e.g.
+    # lactate taken after reps 3, 6, 9), so reps run so far ~ rep_number.
+    accumulated_min = df["rep_number"].astype(float) * rep_time / 60.0
+    humidity = df["humidity_pct"].astype(float).where(~indoor)
 
     design = pd.DataFrame(index=df.index)
+    design["rep_duration"] = np.log2(rep_time / STANDARD_REP_TIME_S)
+    design["rest_fraction"] = (rest_s / (rep_time + rest_s) - STANDARD_REST_FRACTION) * 10.0
+    design["accumulated_work"] = (accumulated_min - STANDARD_ACCUMULATED_WORK_MIN) / 10.0
     design["treadmill"] = surface.eq("Treadmill").astype(float)
     design["road"] = surface.eq("Road").astype(float)
     design["offroad"] = surface.isin(OFFROAD_SURFACES).astype(float)
     design["incline"] = df["incline_pct"].astype(float).fillna(0.0) * design["treadmill"]
     design["heat"] = (temperature - STANDARD_TEMPERATURE_C).clip(lower=0.0)
-    design["rep_index"] = (df["rep_number"].astype(float) - 1.0).clip(lower=0.0)
-    design["rep_duration"] = np.log2(rep_time / STANDARD_REP_TIME_S)
-    design["rest"] = (rest_s - STANDARD_REST_S) / 60.0
+    design["humidity"] = ((humidity - STANDARD_HUMIDITY_PCT).clip(lower=0.0) / 10.0).fillna(0.0)
+    design["super_shoes"] = _is_super_shoe(df["shoes"]).astype(float)
     design["jog_rest"] = rest_type.isin(["Jog", "Float"]).astype(float)
     design["second_session"] = df["had_earlier_session_today"].astype(float)
     return design[[f.key for f in FACTORS]]
+
+
+def structure_design(rep_time_s: float, rest_s: float) -> np.ndarray:
+    """Condition vector for a workout structure under otherwise standard
+    conditions (track, cool, mid-session, first session of the day)."""
+    row = {f.key: 0.0 for f in FACTORS}
+    row["rep_duration"] = np.log2(rep_time_s / STANDARD_REP_TIME_S)
+    row["rest_fraction"] = (rest_s / (rep_time_s + rest_s) - STANDARD_REST_FRACTION) * 10.0
+    return np.array([row[f.key] for f in FACTORS])
 
 
 def prepare_model_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -159,6 +228,9 @@ def prepare_model_frame(df: pd.DataFrame) -> pd.DataFrame:
     model_df = df[keep].copy().reset_index(drop=True)
     if model_df.empty:
         raise ValueError("No reps with both lactate and pace available to model.")
+    for col in ("humidity_pct", "shoes", "incline_pct", "rest_duration_s", "rest_type", "temperature_c"):
+        if col not in model_df.columns:
+            model_df[col] = np.nan
     week_start = model_df["date"].dt.to_period("W-SUN").dt.start_time
     model_df["week_start"] = week_start
     model_df["week_idx"] = ((week_start - week_start.min()).dt.days // 7).astype(int)
@@ -172,19 +244,17 @@ def build_model(model_df: pd.DataFrame, design: pd.DataFrame) -> pm.Model:
     prior_sds = np.array([f.prior_sd for f in FACTORS])
 
     pace = model_df["pace_s_per_km"].to_numpy(float)
-    log_lactate = np.log(model_df["lactate_mmol"].to_numpy(float))
-    # Rough data-driven starting level: observed pace shifted to 2.0 mmol/L
-    # with a typical slope -- only centers the prior, the data decides.
-    start_guess = float(np.median(pace + (log_lactate - np.log(REFERENCE_LACTATE)) / 0.025))
+    lactate = model_df["lactate_mmol"].to_numpy(float)
+    start_guess = float(np.median(pace[(lactate > 1.5) & (lactate < 2.5)])) if ((lactate > 1.5) & (lactate < 2.5)).any() else float(np.median(pace))
 
     coords = {"week": np.arange(n_weeks), "session": session_ids, "factor": [f.key for f in FACTORS]}
     with pm.Model(coords=coords) as model:
         cost = pm.Normal("cost", mu=prior_means, sigma=prior_sds, dims="factor")
-        # Slope of log(lactate) per s/km, constrained negative (faster ->
-        # more lactate). Centered on ~2.5%/s/km, a typical value around the
-        # lactate threshold, but allowed to range ~2x either way.
-        log_neg_slope = pm.Normal("log_neg_slope", mu=np.log(0.025), sigma=0.4)
-        slope = pm.Deterministic("slope", -pm.math.exp(log_neg_slope))
+        log_steepness = pm.Normal("log_steepness", mu=np.log(STEEPNESS_PRIOR_MEDIAN), sigma=STEEPNESS_PRIOR_LOG_SD)
+        steepness = pm.Deterministic("steepness", pm.math.exp(log_steepness))
+        baseline = pm.TruncatedNormal(
+            "baseline", mu=0.8, sigma=0.25, lower=0.3, upper=min(0.95 * float(lactate.min()), 1.5)
+        )
 
         fitness_start = pm.Normal("fitness_start", mu=start_guess, sigma=15.0)
         weekly_change_sd = pm.HalfNormal("weekly_change_sd", sigma=2.0)
@@ -195,18 +265,26 @@ def build_model(model_df: pd.DataFrame, design: pd.DataFrame) -> pm.Model:
             dims="week",
         )
 
-        form_sd = pm.HalfNormal("form_sd", sigma=0.2)
+        form_sd = pm.HalfNormal("form_sd", sigma=0.3)
         form_raw = pm.Normal("form_raw", 0.0, 1.0, dims="session")
         form = pm.Deterministic("form", form_raw * form_sd, dims="session")
 
+        # Session-specific lactate drift over the session. Pace is steered by
+        # lactate (slow down when it drifts up), so without this the drift
+        # leaks into the pace-lactate relationship and flattens the curve.
+        drift_sd = pm.HalfNormal("drift_sd", sigma=0.3)
+        drift_raw = pm.Normal("drift_raw", 0.0, 1.0, dims="session")
+        drift = drift_raw * drift_sd
+
         effective_pace = pace - pm.math.dot(design.to_numpy(float), cost)
-        mu = (
-            np.log(REFERENCE_LACTATE)
-            + slope * (effective_pace - fitness[model_df["week_idx"].to_numpy()])
+        exponent = (
+            steepness * (fitness[model_df["week_idx"].to_numpy()] - effective_pace)
             + form[session_codes]
+            + drift[session_codes] * design["accumulated_work"].to_numpy(float)
         )
+        mu = pm.math.log(baseline + (REFERENCE_LACTATE - baseline) * pm.math.exp(exponent))
         noise_sd = pm.HalfNormal("noise_sd", sigma=0.2)
-        pm.StudentT("log_lactate", nu=4, mu=mu, sigma=noise_sd, observed=log_lactate)
+        pm.StudentT("log_lactate", nu=4, mu=mu, sigma=noise_sd, observed=np.log(lactate))
     return model
 
 
@@ -231,12 +309,16 @@ def fit(df: pd.DataFrame, draws: int = 1000, tune: int = 1000, chains: int = 4, 
             target_accept=0.95,
             random_seed=seed,
             progressbar=False,
-            # Sequential chains: the model samples in seconds, and parallel
-            # chain processes (and the NUMBA backend) hung on this Windows setup.
+            # Sequential chains: the model samples in about a minute, and
+            # parallel chain processes (and the NUMBA backend) hung on this
+            # Windows setup.
             cores=1,
         )
     max_rhat = float(
-        az.rhat(idata, var_names=["cost", "slope", "fitness", "form_sd", "noise_sd"]).to_dataset().to_array().max()
+        az.rhat(idata, var_names=["cost", "steepness", "baseline", "fitness", "form_sd", "drift_sd", "noise_sd"])
+        .to_dataset()
+        .to_array()
+        .max()
     )
     n_divergences = int(idata.sample_stats["diverging"].to_numpy().sum())
     return FitnessFit(model_df, design, idata, n_divergences, max_rhat)
@@ -258,27 +340,32 @@ def _interval(values: np.ndarray, axis: int = 0) -> dict:
     }
 
 
-def pace_offset_for_lactate(slope_draws: np.ndarray, target_lactate: float) -> np.ndarray:
+def _rounded(values: np.ndarray, digits: int = 1) -> dict:
+    return {k: round(float(v), digits) for k, v in _interval(values).items()}
+
+
+def pace_offset_for_lactate(steepness: np.ndarray, baseline: np.ndarray, target_lactate: float) -> np.ndarray:
     """s/km to add to the 2.0-mmol pace to get the pace at target_lactate
     (negative = faster), per posterior draw."""
-    return np.log(target_lactate / REFERENCE_LACTATE) / slope_draws
+    return -np.log((target_lactate - baseline) / (REFERENCE_LACTATE - baseline)) / steepness
 
 
 def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
     model_df, design = fit_result.model_df, fit_result.design
-    slope = _draws(fit_result, "slope")
+    steepness = _draws(fit_result, "steepness")
+    baseline = _draws(fit_result, "baseline")
     fitness = _draws(fit_result, "fitness")
     cost = _draws(fit_result, "cost")
     form = _draws(fit_result, "form")
+    offsets = {t: pace_offset_for_lactate(steepness, baseline, t) for t in targets}
 
-    # Trend only over weeks between first and last data, per target lactate.
     week_dates = model_df.groupby("week_idx")["week_start"].first()
     all_weeks = pd.date_range(week_dates.min(), week_dates.max(), freq="7D")
     weeks_with_data = set(model_df["week_idx"])
+    last_week = max(weeks_with_data)
     trend: dict[str, list[dict]] = {}
     for target in targets:
-        series = fitness + pace_offset_for_lactate(slope, target)[:, None]
-        band = _interval(series)
+        band = _interval(fitness + offsets[target][:, None])
         trend[str(target)] = [
             {
                 "week_start": str(week.date()),
@@ -288,20 +375,37 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
             for i, week in enumerate(all_weeks)
         ]
 
-    # Per-rep normalized pace: what this rep is worth at target lactate under
-    # standard conditions (posterior median over draws).
+    # Target paces for typical workout structures, current week.
+    structures = []
+    for label, distance, rep_time_s, rest_s in WORKOUT_STRUCTURES:
+        structure_cost = cost @ structure_design(rep_time_s, rest_s)
+        structures.append(
+            {
+                "label": label,
+                "rep_distance_m": distance,
+                "rep_time_s": rep_time_s,
+                "rest_s": rest_s,
+                "pace": {
+                    str(t): _rounded(fitness[:, last_week] + offsets[t] + structure_cost) for t in targets
+                },
+            }
+        )
+
+    # Per-rep normalized pace: the pace at target lactate under standard
+    # conditions that this rep implies. Readings at or below the baseline
+    # carry no pace information, so they're clipped just above it.
     pace = model_df["pace_s_per_km"].to_numpy(float)
-    log_lac = np.log(model_df["lactate_mmol"].to_numpy(float))
+    lactate = model_df["lactate_mmol"].to_numpy(float)
     effective = pace[None, :] - cost @ design.to_numpy(float).T
-    reps = []
+    excess = np.maximum(lactate[None, :] - baseline[:, None], 0.05)
     for target in targets:
-        normalized = effective - (log_lac[None, :] - np.log(target)) / slope[:, None]
+        normalized = effective + np.log(excess / (target - baseline[:, None])) / steepness[:, None]
         model_df[f"normalized_pace_{target}"] = np.median(normalized, axis=0)
+
     session_codes, session_ids = pd.factorize(model_df["session_id"])
-    # form > 0 means more lactate than the trend predicts (a worse day);
-    # dividing by the negative slope turns that into s/km with positive =
-    # better day than the trend.
-    form_s_per_km = form / slope[:, None]
+    # form > 0 means more lactate than the trend predicts (a worse day); as
+    # s/km with positive = better day than the trend.
+    form_s_per_km = -form / steepness[:, None]
     sessions = []
     for code, session_id in enumerate(session_ids):
         rows = model_df[session_codes == code]
@@ -313,6 +417,7 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
                 "period": first.get("session_period"),
                 "workout_type": first.get("workout_type") if pd.notna(first.get("workout_type")) else None,
                 "surface": first.get("surface") if pd.notna(first.get("surface")) else None,
+                "rep_distance_m": float(first["rep_distance_m"]) if pd.notna(first.get("rep_distance_m")) else None,
                 "n_reps": int(len(rows)),
                 "mean_pace_s_per_km": round(float(rows["pace_s_per_km"].mean()), 1),
                 "mean_lactate": round(float(rows["lactate_mmol"].mean()), 2),
@@ -322,23 +427,11 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
                 "form_s_per_km": round(float(np.median(form_s_per_km[:, code])), 1),
             }
         )
-    for _, row in model_df.iterrows():
-        reps.append(
-            {
-                "date": str(row["date"].date()),
-                "session_id": row["session_id"],
-                "rep_number": int(row["rep_number"]),
-                "pace_s_per_km": round(float(row["pace_s_per_km"]), 1),
-                "lactate_mmol": float(row["lactate_mmol"]),
-                "normalized_pace": {str(t): round(float(row[f"normalized_pace_{t}"]), 1) for t in targets},
-            }
-        )
 
     factors = []
     for j, factor in enumerate(FACTORS):
         values = cost[:, j]
         observed = design[factor.key].abs().gt(1e-9)
-        posterior_sd = float(values.std())
         factors.append(
             {
                 "key": factor.key,
@@ -349,36 +442,43 @@ def summarize(fit_result: FitnessFit, targets: list[float]) -> dict:
                 "prior_sd": factor.prior_sd,
                 "median": round(float(np.median(values)), 1),
                 "ci95": [round(float(np.percentile(values, 2.5)), 1), round(float(np.percentile(values, 97.5)), 1)],
-                "prob_harder": round(float(np.mean(values > 0)), 2),
                 "n_reps_affected": int(observed.sum()),
-                "learned_from_data": posterior_sd <= LEARNED_FROM_DATA_SD_RATIO * factor.prior_sd,
+                "learned_from_data": float(values.std()) <= LEARNED_FROM_DATA_SD_RATIO * factor.prior_sd,
             }
         )
 
-    lactate_ratio_1_5 = np.log(1.5) / -slope
+    _, outdoor_temp_missing = _impute_temperature(model_df)
+    missing_temp_rows = model_df.loc[outdoor_temp_missing].drop_duplicates("session_id").sort_values("date")
+    missing_temp_sessions = [
+        f"{row.date.date()} {row.session_period}" for row in missing_temp_rows.itertuples()
+    ]
+
     return {
         "reference_lactate": REFERENCE_LACTATE,
         "targets": targets,
         "trend": trend,
+        "structures": structures,
         "sessions": sessions,
-        "reps": reps,
         "factors": factors,
         "curve": {
-            "slope_pct_per_s_per_km": {
-                k: round(float(v), 2) for k, v in _interval(-slope * 100).items()
-            },
-            "s_per_km_for_1_5x_lactate": {k: round(float(v), 1) for k, v in _interval(lactate_ratio_1_5).items()},
+            "baseline_mmol": _rounded(baseline, 2),
+            "steepness_learned_from_data": float(np.log(steepness).std())
+            <= LEARNED_FROM_DATA_SD_RATIO * STEEPNESS_PRIOR_LOG_SD,
+            "s_per_km_2_to_3": _rounded(-offsets[3.0]) if 3.0 in offsets else None,
+            "lactate_drop_5s_slower_pct": _rounded(
+                100 * (1 - (baseline + (REFERENCE_LACTATE - baseline) * np.exp(-5 * steepness)) / REFERENCE_LACTATE)
+            ),
         },
-        "day_to_day_form_sd_s_per_km": round(float(np.median(_draws(fit_result, "form_sd") / -slope)), 1),
+        "day_to_day_form_sd_s_per_km": round(float(np.median(_draws(fit_result, "form_sd") / steepness)), 1),
         "diagnostics": {
             "n_reps": int(len(model_df)),
             "n_sessions": int(len(session_ids)),
-            "n_temperature_imputed": int(_impute_temperature(model_df)[1].sum()),
+            "outdoor_temperature_missing_sessions": missing_temp_sessions,
             "n_divergences": fit_result.n_divergences,
             "max_rhat": round(fit_result.max_rhat, 3),
             "converged": fit_result.max_rhat <= 1.05 and fit_result.n_divergences == 0,
         },
         "_fitness_draws": fitness,
-        "_slope_draws": slope,
+        "_last_week_idx": last_week,
         "_week_starts": [str(d.date()) for d in all_weeks],
     }

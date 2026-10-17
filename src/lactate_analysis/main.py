@@ -9,7 +9,18 @@ from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
-from . import config, cycles, features, fitness_model, ingest, report_data, report_html, sessions, validation
+from . import (
+    config,
+    cycles,
+    features,
+    fitness_model,
+    heart_rate_model,
+    ingest,
+    report_data,
+    report_html,
+    sessions,
+    validation,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -54,7 +65,10 @@ def run(args: argparse.Namespace) -> dict:
     validation_report = validation.build_validation_report(feature_df)
     fit = fitness_model.fit(feature_df)
     fitness_summary = fitness_model.summarize(fit, config.TARGET_LACTATE_LEVELS)
-    summary = report_data.build_summary(feature_df, validation_report, fitness_summary, cycle_defs)
+    heart_rate_summary = heart_rate_model.fit_and_summarize(feature_df, config.TARGET_LACTATE_LEVELS)
+    summary = report_data.build_summary(
+        feature_df, validation_report, fitness_summary, cycle_defs, heart_rate_summary
+    )
 
     output_json_path = Path(args.output_json)
     output_json_path.parent.mkdir(parents=True, exist_ok=True)

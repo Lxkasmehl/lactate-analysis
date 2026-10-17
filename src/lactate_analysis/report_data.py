@@ -45,15 +45,14 @@ def _change(diff_draws: np.ndarray) -> dict:
 
 def _status(fitness_summary: dict) -> dict:
     fitness = fitness_summary["_fitness_draws"]
-    slope = fitness_summary["_slope_draws"]
     week_starts = fitness_summary["_week_starts"]
-    trend_2 = fitness_summary["trend"][str(fitness_summary["reference_lactate"])]
-    last_idx = max(i for i, w in enumerate(trend_2) if w["has_data"])
+    last_idx = fitness_summary["_last_week_idx"]
 
-    current = {}
-    for target in fitness_summary["targets"]:
-        offset = np.log(target / fitness_summary["reference_lactate"]) / slope
-        current[str(target)] = _interval(fitness[:, last_idx] + offset)
+    current = {
+        target: {k: week[k] for k in ("median", "lo95", "hi95")}
+        for target, weeks in fitness_summary["trend"].items()
+        for week in [weeks[last_idx]]
+    }
 
     comparisons = []
     for label, weeks in COMPARISON_WEEKS.items():
@@ -64,7 +63,7 @@ def _status(fitness_summary: dict) -> dict:
             {
                 "label": label,
                 "week_start": week_starts[earlier_idx],
-                # The fitted slope is shared over time, so the change is the
+                # The curve's shape is shared over time, so the change is the
                 # same at every target lactate.
                 **_change(fitness[:, last_idx] - fitness[:, earlier_idx]),
             }
@@ -126,6 +125,7 @@ def build_summary(
     validation_report: dict,
     fitness_summary: dict,
     cycle_defs: list[dict],
+    heart_rate_summary: dict | None = None,
 ) -> dict:
     status = _status(fitness_summary)
     max_effort_rows = int(df["workout_type"].isin(MAX_EFFORT_WORKOUT_TYPES).sum()) if "workout_type" in df else 0
@@ -143,9 +143,10 @@ def build_summary(
         "status": status,
         "cycles": _cycle_summaries(fitness_summary, cycle_defs),
         "fitness": public_fitness,
+        "heart_rate": heart_rate_summary,
         "data_quality": {
             "fill_rates": validation_report["covariate_fill_rates"],
-            "temperature_imputed": public_fitness["diagnostics"]["n_temperature_imputed"],
+            "outdoor_temperature_missing_sessions": public_fitness["diagnostics"]["outdoor_temperature_missing_sessions"],
             "max_effort_rows_excluded": max_effort_rows,
             "max_effort_workout_types": MAX_EFFORT_WORKOUT_TYPES,
         },

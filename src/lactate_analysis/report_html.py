@@ -42,7 +42,18 @@ def format_pace_short(s_per_km: float | None) -> str:
 def format_signed_seconds(value: float | None) -> str:
     if value is None:
         return "?"
+    if abs(value) < 0.05:
+        return "±0.0 s/km"
     return f"{value:+.1f} s/km"
+
+
+def format_certainty(change: dict) -> str:
+    """Verdict plus how sure the model is of *that* direction."""
+    if change["verdict"] == "faster":
+        return f"faster, {change['prob_faster']:.0%} sure"
+    if change["verdict"] == "slower":
+        return f"slower, {1 - change['prob_faster']:.0%} sure"
+    return f"no clear change ({change['prob_faster']:.0%} chance faster)"
 
 
 def _pace_axis(fig: go.Figure, values: list[float]) -> None:
@@ -170,6 +181,33 @@ def _factor_figure(summary: dict) -> go.Figure:
     return fig
 
 
+def _heart_rate_figure(summary: dict) -> go.Figure:
+    weeks = summary["heart_rate"]["trend_at_2"]
+    x = [w["week_start"] for w in weeks]
+    color = TARGET_COLORS["2.0"]
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=x + x[::-1], y=[w["hi95"] for w in weeks] + [w["lo95"] for w in weeks][::-1],
+            fill="toself", fillcolor=_rgba(color, 0.15), line=dict(width=0), hoverinfo="skip", showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x, y=[w["median"] for w in weeks], mode="lines", line=dict(color=color, width=2), showlegend=False,
+            customdata=[[w["lo95"], w["hi95"]] for w in weeks],
+            hovertemplate="Week of %{x}<br>%{y:.0f} bpm (95%: %{customdata[0]:.0f}–%{customdata[1]:.0f})<extra></extra>",
+        )
+    )
+    fig.update_yaxes(title="bpm at 2.0 mmol/L (5-min reps)", gridcolor="#ecebe8", zeroline=False)
+    fig.update_xaxes(gridcolor="#ecebe8")
+    fig.update_layout(
+        template="plotly_white", height=300, margin=dict(l=70, r=20, t=20, b=40),
+        plot_bgcolor="#fcfcfb", paper_bgcolor="#fcfcfb",
+    )
+    return fig
+
+
 def _rgba(hex_color: str, alpha: float) -> str:
     r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
     return f"rgba({r},{g},{b},{alpha})"
@@ -181,10 +219,13 @@ def render(summary: dict, offline: bool = False) -> str:
         "fitness_trend": _fitness_trend_figure(summary).to_html(full_html=False, include_plotlyjs=include_plotlyjs),
         "factors": _factor_figure(summary).to_html(full_html=False, include_plotlyjs=False),
     }
+    if summary.get("heart_rate"):
+        figs_html["heart_rate"] = _heart_rate_figure(summary).to_html(full_html=False, include_plotlyjs=False)
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=select_autoescape(["html"]))
     env.filters["pace"] = format_pace
     env.filters["pace_short"] = format_pace_short
     env.filters["signed_s"] = format_signed_seconds
+    env.filters["certainty"] = format_certainty
     template = env.get_template("report.html.j2")
     sessions_latest_first = sorted(summary["fitness"]["sessions"], key=lambda s: s["date"], reverse=True)
     return template.render(summary=summary, figs=figs_html, sessions=sessions_latest_first)

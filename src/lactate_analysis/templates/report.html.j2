@@ -60,14 +60,49 @@
       <div class="tile">
         <div class="label">Change vs. {{ c.label }}</div>
         <div class="value">{{ c.median | signed_s }}</div>
-        <div class="sub">{{ c.verdict }} · {{ (c.prob_faster * 100) | round | int }}% chance you're faster</div>
+        <div class="sub">{{ c | certainty }}</div>
       </div>
       {% endfor %}
     </div>
     <p class="note" style="margin: 1rem 0 0;">
-      As of the week of {{ status.as_of_week }}. Negative = faster. "Standard conditions" means: track,
-      15°C or cooler, first rep of a 5-minute rep with 60 s standing rest, first session of the day.
+      As of the week of {{ status.as_of_week }}. Negative = faster. "Standard conditions" means: 5-minute reps
+      with 60 s standing rest, about 15 minutes of reps into the session, on the track, 15°C or cooler, first
+      session of the day. Target paces for other workout structures are in the next section.
     </p>
+  </section>
+
+  <section>
+    <h2>Target paces for your workouts</h2>
+    <p class="note">
+      What 2.0 and 3.0 mmol/L currently correspond to for typical rep structures, under otherwise standard
+      conditions. Short reps with short rest can be run noticeably faster at the same lactate.
+      {% if summary.heart_rate %}Heart rate is the average over a rep as your watch logs it: in short reps it
+      never reaches its plateau, so it reads lower at the same lactate.{% endif %}
+      Add about {{ "%.1f" | format(summary.fitness.factors | selectattr("key", "equalto", "heat") | map(attribute="median") | first) }} s/km
+      per °C above 15°C.
+    </p>
+    <div class="table-wrap"><table>
+      <tr>
+        <th>Workout</th>
+        <th class="num"><span class="swatch" style="background: var(--blue)"></span>Pace @ 2.0</th>
+        <th class="num"><span class="swatch" style="background: var(--orange)"></span>Pace @ 3.0</th>
+        {% if summary.heart_rate %}<th class="num">HR @ 2.0</th><th class="num">HR @ 3.0</th>{% endif %}
+      </tr>
+      {% for st in summary.fitness.structures %}
+      {% set hr = summary.heart_rate.structures[loop.index0].hr if summary.heart_rate else none %}
+      <tr>
+        <td>{{ st.label }}</td>
+        {% for t in ["2.0", "3.0"] %}
+        <td class="num">{{ st.pace[t].median | pace }}<br><span class="muted">{{ st.pace[t].lo95 | pace_short }}–{{ st.pace[t].hi95 | pace_short }}</span></td>
+        {% endfor %}
+        {% if hr %}
+        {% for t in ["2.0", "3.0"] %}
+        <td class="num">{{ hr[t].median }} bpm<br><span class="muted">{{ hr[t].lo95 }}–{{ hr[t].hi95 }}</span></td>
+        {% endfor %}
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </table></div>
   </section>
 
   <section>
@@ -95,7 +130,7 @@
         {% if c.pace_at_reference %}
         <td class="num">{{ c.pace_at_reference.median | pace }}</td>
         <td class="num muted">{{ c.pace_at_reference.lo95 | pace_short }}–{{ c.pace_at_reference.hi95 | pace_short }}</td>
-        <td>{% if c.change_vs_previous %}{{ c.change_vs_previous.median | signed_s }} <span class="pill">{{ c.change_vs_previous.verdict }}, {{ (c.change_vs_previous.prob_faster * 100) | round | int }}% faster</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+        <td>{% if c.change_vs_previous %}{{ c.change_vs_previous.median | signed_s }} <span class="pill">{{ c.change_vs_previous | certainty }}</span>{% else %}<span class="muted">–</span>{% endif %}</td>
         {% else %}
         <td class="num muted" colspan="3">no lactate data in this cycle</td>
         {% endif %}
@@ -133,15 +168,36 @@
     <h2>Your lactate curve</h2>
     {% set curve = summary.fitness.curve %}
     <p class="note">
-      Your lactate rises about <strong>{{ curve.slope_pct_per_s_per_km.median }}% per s/km</strong> faster
-      (95%: {{ curve.slope_pct_per_s_per_km.lo95 }}–{{ curve.slope_pct_per_s_per_km.hi95 }}%). Going from 2.0 to 3.0 mmol/L
-      takes about <strong>{{ curve.s_per_km_for_1_5x_lactate.median }} s/km</strong> more speed
-      (95%: {{ curve.s_per_km_for_1_5x_lactate.lo95 }}–{{ curve.s_per_km_for_1_5x_lactate.hi95 }}).
-      This is why a simple lactate ÷ speed ratio misleads: running 5 s/km slower lowers lactate by roughly
-      {{ (100 * (1 - (2.718281828 ** (-0.05 * curve.slope_pct_per_s_per_km.median)))) | round | int }}% with no change in fitness at all.
-      The normalized pace in this report corrects for that.
+      The model uses the classic lactate curve: a resting baseline (yours: about {{ curve.baseline_mmol.median }} mmol/L)
+      plus a part that rises exponentially with speed. Going from 2.0 to 3.0 mmol/L takes about
+      <strong>{{ curve.s_per_km_2_to_3.median }} s/km</strong> more speed (95%: {{ curve.s_per_km_2_to_3.lo95 }}–{{ curve.s_per_km_2_to_3.hi95 }}).
+      This is why a simple lactate ÷ speed ratio misleads: running 5 s/km slower around 2 mmol/L lowers lactate by
+      roughly {{ curve.lactate_drop_5s_slower_pct.median | round | int }}% with no change in fitness at all. The normalized
+      pace in this report corrects for that.
+    </p>
+    <p class="note">
+      <strong>How sure is this?</strong> Because you steer pace by lactate, each workout type is run at almost the same
+      pace, so your data alone can't tell "steep curve, short reps much easier" apart from "flat curve, short reps a bit
+      easier" (both fit equally well). The steepness therefore leans on step-test values from the literature, which
+      also match your raw long-rep data. The cheapest way to make it truly yours is a mini step test inside a normal
+      session: e.g. three 1000 m reps deliberately about 5 s/km apart (slow → fast), lactate after each.
     </p>
   </section>
+
+  {% if summary.heart_rate %}
+  {% set hrs = summary.heart_rate %}
+  <section>
+    <h2>Heart rate at 2.0 mmol/L over time</h2>
+    <p class="note">
+      Average heart rate that goes with 2.0 mmol/L in a 5-minute rep under standard conditions, from
+      {{ hrs.n_reps }} reps with both values. A falling line at the same lactate usually means better fitness or heat
+      acclimatization. Going from 2.0 to 3.0 mmol/L adds about {{ hrs.bpm_2_to_3.median }} bpm
+      (95%: {{ hrs.bpm_2_to_3.lo95 }}–{{ hrs.bpm_2_to_3.hi95 }}); heat adds about {{ hrs.heat_bpm_per_c }} bpm per °C above 15°C.
+      Heart rate also varies day to day with sleep, stress and hydration, so use it as a guide rather than a hard limit.
+    </p>
+    {{ figs.heart_rate | safe }}
+  </section>
+  {% endif %}
 
   <section>
     <h2>Sessions</h2>
@@ -177,12 +233,21 @@
         {% if diag.converged %}Sampling converged (R-hat {{ diag.max_rhat }}, no divergences).
         {% else %}<span class="warn">Sampling did not fully converge (R-hat {{ diag.max_rhat }}, {{ diag.n_divergences }} divergences) – treat numbers with caution.</span>{% endif %}
       </li>
-      <li>Temperature was missing for {{ dq.temperature_imputed }} reps and filled in: treadmill as indoor temperature, outdoor with the average of your recorded temperatures in the same month.</li>
+      {% if dq.outdoor_temperature_missing_sessions %}
+      <li class="warn">
+        No temperature on {{ dq.outdoor_temperature_missing_sessions | length }} outdoor session(s):
+        {{ dq.outdoor_temperature_missing_sessions | join(", ") }}. They were filled in with the average of your recorded
+        temperatures in the same month. If any of these were on an indoor track, set Surface to "Indoor Track" in the
+        sheet; otherwise adding the temperature makes them count fully.
+      </li>
+      {% endif %}
+      <li>Treadmill and indoor sessions are assumed to be at {{ 18 }}°C with no humidity effect.</li>
+      <li>"Carbon super shoes" compares sessions where a super shoe is logged against sessions with no shoe logged, which may include super shoes too, so the true effect is probably a bit larger.</li>
       {% if dq.max_effort_rows_excluded %}
       <li>{{ dq.max_effort_rows_excluded }} rep(s) logged as {{ dq.max_effort_workout_types | join(", ") }} were left out: an all-out effort is a different physiological situation from threshold training.</li>
       {% endif %}
-      <li>Heart rate is intentionally not used as a factor: it's a result of intensity, not a condition, and correcting for it would remove part of the fitness signal itself.</li>
-      <li>One shared lactate-curve slope is assumed over the whole period. If the shape of your curve changes with fitness (not just its position), this simplification hides that.</li>
+      <li>Heart rate is not used to normalize lactate: it's a result of intensity, not a condition. It has its own model (target table and chart above).</li>
+      <li>One shared lactate-curve shape is assumed over the whole period. If the shape of your curve changes with fitness (not just its position), this simplification hides that.</li>
       <li>A large treadmill effect can also come from belt-speed calibration: if the treadmill's displayed speed is off, the model absorbs that into the treadmill factor.</li>
     </ul>
     <details>
