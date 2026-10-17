@@ -35,7 +35,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             f"{config.SOURCE_ENV_VAR} environment variable (or .env)."
         ),
     )
-    parser.add_argument("--cycles", default=config.DEFAULT_CYCLES_PATH, help="Path to cycles.yaml")
+    parser.add_argument(
+        "--cycles",
+        default=config.DEFAULT_CYCLES_PATH,
+        help='Fallback cycles.yaml, used only if the spreadsheet has no "Cycles" tab',
+    )
     parser.add_argument("--output-html", default=config.DEFAULT_OUTPUT_HTML)
     parser.add_argument("--output-json", default=config.DEFAULT_OUTPUT_JSON)
     parser.add_argument("--offline", action="store_true", help="Inline Plotly JS for fully offline viewing")
@@ -56,9 +60,10 @@ def resolve_input(cli_input: str | None) -> str:
 
 
 def run(args: argparse.Namespace) -> dict:
-    raw_df = ingest.load(resolve_input(args.input))
+    workbook_path = ingest.resolve_source(resolve_input(args.input))
+    raw_df = ingest.load(workbook_path)
     sessioned_df = sessions.assign_sessions(raw_df)
-    cycle_defs = cycles.load_cycle_definitions(args.cycles)
+    cycle_defs = cycles.load_from_workbook(workbook_path) or cycles.load_cycle_definitions(args.cycles)
     cycled_df = cycles.attach_cycle_labels(sessioned_df, cycle_defs)
     feature_df = features.build_feature_frame(cycled_df)
 

@@ -75,6 +75,24 @@ posterior draws exported by the model (no server, no AI/API calls):
 `output/report.json` holds the same results as structured data, the hand-off
 contract for a later web frontend or LLM explanation layer.
 
+## Training cycles
+
+Add a tab named **Cycles** to the spreadsheet with the columns `Label`, `Start`, `End`.
+A new row starts a cycle; filling in `End` closes it (empty `End` = still running).
+`data/cycles.yaml` is only used if the spreadsheet has no such tab.
+
+## Hosting (coach access)
+
+`.github/workflows/report.yml` runs twice a day (and on demand via "Run workflow" in
+the Actions tab): it fits the models on the current sheet, builds a static site with
+`scripts/build_site.py` and deploys it to the Vercel project `lactate`
+(lactate.lukasmehl.com). The report lives at `/r/<REPORT_SECRET>/`; the root shows
+nothing and all responses are `noindex`, so the full link works like a private link.
+To revoke access, set a new `REPORT_SECRET` and rerun the workflow.
+
+Repository secrets: `LACTATE_SOURCE`, `REPORT_SECRET`, `VERCEL_TOKEN`,
+`VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.
+
 ## Tests
 
 ```

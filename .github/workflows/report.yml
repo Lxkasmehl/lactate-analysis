@@ -1,0 +1,44 @@
+name: Build and deploy report
+
+on:
+  schedule:
+    # Twice a day: 7:00 and 21:00 US Central (daylight time), after AM and PM sessions.
+    - cron: "0 12 * * *"
+    - cron: "0 2 * * *"
+  # "Run workflow" button in the GitHub Actions tab (also in the GitHub app).
+  workflow_dispatch:
+
+concurrency:
+  group: report
+  cancel-in-progress: true
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LACTATE_SOURCE: ${{ secrets.LACTATE_SOURCE }}
+      REPORT_SECRET: ${{ secrets.REPORT_SECRET }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Fit models and render report
+        run: lactate-report
+
+      - name: Build site
+        run: python scripts/build_site.py output/report.html site
+
+      - name: Deploy to Vercel
+        working-directory: site
+        run: npx --yes vercel@latest deploy --prod --yes --token "${{ secrets.VERCEL_TOKEN }}"

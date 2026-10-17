@@ -159,7 +159,11 @@
 
   <section>
     <h2>Training cycles</h2>
-    <p class="note">Average standardized pace at {{ summary.fitness.reference_lactate }} mmol/L over each cycle's weeks with data.</p>
+    <p class="note">
+      Average standardized pace at {{ summary.fitness.reference_lactate }} mmol/L over each cycle's weeks with data.
+      Cycles are edited in the "Cycles" tab of the training spreadsheet (Label, Start, End; leave End empty while a
+      cycle is running) and show up after the next update.
+    </p>
     <div class="table-wrap"><table>
       <tr><th>Cycle</th><th>Dates</th><th class="num">Sessions</th><th class="num">Pace at {{ summary.fitness.reference_lactate }} mmol/L</th><th class="num">95% range</th><th>vs. previous cycle</th></tr>
       {% for c in summary.cycles %}
