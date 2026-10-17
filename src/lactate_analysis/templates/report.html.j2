@@ -2,263 +2,199 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Lactate Analysis Report</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lactate Fitness Report</title>
 <style>
-  body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 2rem auto; max-width: 960px; color: #1a1a1a; background: #fafafa; }
-  h1 { margin-bottom: 0.2rem; }
-  .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
-  .status-tile { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1.2rem 1.5rem; margin-bottom: 2rem; }
-  .status-tile .headline { font-size: 1.1rem; font-weight: 600; }
-  .stats { display: flex; flex-wrap: wrap; gap: 1.5rem 2rem; margin-top: 0.8rem; color: #444; font-size: 0.9rem; }
-  section { margin-bottom: 2.5rem; }
-  h2 { border-bottom: 2px solid #eee; padding-bottom: 0.3rem; }
-  .section-note { color: #666; font-size: 0.85rem; margin-top: -0.5rem; margin-bottom: 1rem; }
-  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
-  ul.caveats li { margin-bottom: 0.4rem; }
-  .low-confidence { color: #b45309; }
+  :root {
+    --surface: #fcfcfb; --card: #ffffff; --border: #e4e3df;
+    --text: #0b0b0b; --text-2: #52514e; --text-3: #7a7974;
+    --blue: #2a78d6; --orange: #eb6834; --warn: #a15c00;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 0; background: var(--surface); color: var(--text); line-height: 1.5; }
+  main { max-width: 1000px; margin: 0 auto; padding: 2rem 16px 4rem; }
+  h1 { margin: 0 0 0.2rem; font-size: 1.7rem; }
+  h2 { font-size: 1.25rem; margin: 0 0 0.4rem; }
+  .meta { color: var(--text-3); font-size: 0.85rem; margin-bottom: 1.5rem; }
+  section { margin-bottom: 2.75rem; }
+  .note { color: var(--text-2); font-size: 0.9rem; max-width: 72ch; margin: 0 0 1rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1.2rem 1.4rem; }
+  .headline { font-size: 1.15rem; font-weight: 600; margin-bottom: 1rem; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 1rem; }
+  .tile .label { color: var(--text-2); font-size: 0.8rem; }
+  .tile .value { font-size: 1.45rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tile .sub { color: var(--text-3); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: baseline; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-2); font-weight: 600; font-size: 0.8rem; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  .muted { color: var(--text-3); }
+  .warn { color: var(--warn); }
+  .pill { display: inline-block; font-size: 0.75rem; padding: 0.05rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
+  ul { padding-left: 1.2rem; } li { margin-bottom: 0.35rem; }
+  details summary { cursor: pointer; color: var(--text-2); }
 </style>
 </head>
 <body>
-  <h1>Lactate Analysis Report</h1>
+<main>
+  <h1>Lactate Fitness Report</h1>
   <div class="meta">
-    Generated {{ summary.generated_at }} &middot;
-    {{ summary.data_summary.n_rows_modeled }}/{{ summary.data_summary.n_rows_total }} rows modeled &middot;
-    {{ summary.data_summary.n_sessions }} sessions &middot;
-    {{ summary.data_summary.date_range[0] }} to {{ summary.data_summary.date_range[1] }}
+    Generated {{ summary.generated_at }} · {{ summary.data_summary.n_rows_modeled }} of {{ summary.data_summary.n_rows_total }} reps modeled ·
+    {{ summary.data_summary.n_sessions }} sessions · {{ summary.data_summary.date_range[0] }} to {{ summary.data_summary.date_range[1] }}
   </div>
 
-  <section class="status-tile">
-    <div class="headline">{{ summary.conclusion.headline }}</div>
-    <div class="stats">
-      <div>Latest cycle: <strong>{{ summary.current_status.latest_cycle }}</strong></div>
-      {% if summary.current_status.pace_at_3mmol_latest_cycle_min_per_mi is not none %}
-      <div>Pace @ 3.0 mmol/L (latest cycle): <strong>{{ summary.current_status.pace_at_3mmol_latest_cycle_min_per_mi | mmss }}/mi</strong></div>
-      {% endif %}
-      {% if summary.current_status.predicted_lactate_at_ref_pace is not none %}
-      <div>Confounder-adjusted lactate @ {{ summary.current_status.reference_pace_min_per_mi | mmss }}/mi: <strong>{{ summary.current_status.predicted_lactate_at_ref_pace }} mmol/L</strong></div>
-      {% endif %}
-      <div>Trend: <strong>{{ summary.current_status.trend_direction }}</strong></div>
+  {% set status = summary.status %}
+  <section class="card">
+    <div class="headline">{{ summary.headline }}</div>
+    <div class="tiles">
+      {% for target, value in status.current.items() %}
+      <div class="tile">
+        <div class="label"><span class="swatch" style="background: {{ 'var(--blue)' if target == '2.0' else 'var(--orange)' }}"></span>Pace at {{ target }} mmol/L, standard conditions</div>
+        <div class="value">{{ value.median | pace_short }}</div>
+        <div class="sub">{{ value.median | pace }} · 95%: {{ value.lo95 | pace_short }}–{{ value.hi95 | pace_short }}</div>
+      </div>
+      {% endfor %}
+      {% for c in status.comparisons %}
+      <div class="tile">
+        <div class="label">Change vs. {{ c.label }}</div>
+        <div class="value">{{ c.median | signed_s }}</div>
+        <div class="sub">{{ c.verdict }} · {{ (c.prob_faster * 100) | round | int }}% chance you're faster</div>
+      </div>
+      {% endfor %}
     </div>
+    <p class="note" style="margin: 1rem 0 0;">
+      As of the week of {{ status.as_of_week }}. Negative = faster. "Standard conditions" means: track,
+      15°C or cooler, first rep of a 5-minute rep with 60 s standing rest, first session of the day.
+    </p>
   </section>
 
   <section>
-    <h2>Pace at fixed lactate concentrations, per cycle</h2>
-    <p class="section-note">
-      This is the standard lactate-step-test readout: how fast you can run at a given lactate
-      concentration. It's the primary fitness signal here -- a lactate reading alone says nothing
-      without the pace it was measured at. These numbers come from inverting one fitted
-      lactate-vs-pace line per cycle (the same confounder-adjusted model as the cross-check
-      below), not from averaging raw per-session estimates -- that guarantees a higher target
-      lactate always maps to a faster pace, which a naive average across different sessions per
-      target does not (different lactate levels can be reached by different, non-overlapping
-      sessions with their own baseline-speed bias).
+    <h2>Is your fitness improving?</h2>
+    <p class="note">
+      The lines show the pace that would produce exactly 2.0 and 3.0 mmol/L under standard conditions, week by week
+      (shaded: 80% and 95% certainty). Each dot is one session, converted to that same standard: its raw pace and
+      lactate, corrected for conditions, then shifted along your own lactate curve to the nearest target. Dots
+      scatter around the line because of day-to-day form (sleep, fatigue, measurement noise) – about
+      ±{{ summary.fitness.day_to_day_form_sd_s_per_km }} s/km for you. The trend is what's left once that noise is averaged out.
     </p>
-    {{ figs.pace_at_lactate_by_cycle | safe }}
-    <table>
+    {{ figs.fitness_trend | safe }}
+  </section>
+
+  <section>
+    <h2>Training cycles</h2>
+    <p class="note">Average standardized pace at {{ summary.fitness.reference_lactate }} mmol/L over each cycle's weeks with data.</p>
+    <div class="table-wrap"><table>
+      <tr><th>Cycle</th><th>Dates</th><th class="num">Sessions</th><th class="num">Pace at {{ summary.fitness.reference_lactate }} mmol/L</th><th class="num">95% range</th><th>vs. previous cycle</th></tr>
+      {% for c in summary.cycles %}
       <tr>
-        <th>Cycle</th>
-        {% for target in ["2.0", "3.0", "4.0"] %}
-        <th>Pace @ {{ target }} mmol/L</th>
-        {% endfor %}
-      </tr>
-      {% for cycle in summary.pace_at_lactate.cycle_order %}
-      <tr>
-        <td>{{ cycle }}</td>
-        {% for target in ["2.0", "3.0", "4.0"] %}
-        {% set entry = summary.pace_at_lactate.by_cycle[cycle][target] %}
-        <td>
-          {% if entry.implausible %}
-          <span class="low-confidence">implausible extrapolation for this cycle (see caveats) -- not shown</span>
-          {% elif entry.pace_min_per_mi is not none %}
-          {{ entry.pace_min_per_mi | mmss }}/mi (95% CI {{ entry.ci_min_per_mi[0] | mmss }}-{{ entry.ci_min_per_mi[1] | mmss }}{% if entry.wide_uncertainty %}, capped{% endif %}, n={{ entry.n_sessions }})
-          {% if entry.wide_uncertainty %}<span class="low-confidence"> -- very wide uncertainty for this cycle</span>{% endif %}
-          {% if entry.unexpected_relationship %}<span class="low-confidence"> -- unexpected slope, treat with caution</span>{% endif %}
-          {% elif entry.out_of_range %}
-          outside this cycle's observed lactate range ({{ entry.lactate_range[0] }}-{{ entry.lactate_range[1] }} mmol/L)
-          {% elif entry.unsolvable %}
-          flat lactate-pace relationship for this cycle, cannot solve
-          {% else %}
-          not enough data
-          {% endif %}
-        </td>
-        {% endfor %}
+        <td>{{ c.label }}</td>
+        <td class="muted">{{ c.start_date }} – {{ c.end_date or "ongoing" }}</td>
+        <td class="num">{{ c.n_sessions }}</td>
+        {% if c.pace_at_reference %}
+        <td class="num">{{ c.pace_at_reference.median | pace }}</td>
+        <td class="num muted">{{ c.pace_at_reference.lo95 | pace_short }}–{{ c.pace_at_reference.hi95 | pace_short }}</td>
+        <td>{% if c.change_vs_previous %}{{ c.change_vs_previous.median | signed_s }} <span class="pill">{{ c.change_vs_previous.verdict }}, {{ (c.change_vs_previous.prob_faster * 100) | round | int }}% faster</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+        {% else %}
+        <td class="num muted" colspan="3">no lactate data in this cycle</td>
+        {% endif %}
       </tr>
       {% endfor %}
-    </table>
-
-    <p class="section-note">
-      Breakdown by workout type: same model, but the fitted line's baseline is shifted to match
-      that specific workout type (estimated from all cycles' data), while the pace-lactate slope
-      still comes from this cycle. This is partial pooling -- even a workout type with only 1-2
-      sessions in a given cycle gets an estimate grounded in what that type looks like elsewhere,
-      instead of being too sparse to report at all. "n_sessions" below is sessions of that exact
-      type actually observed in this cycle -- more of those means less of the estimate is coming
-      from other cycles.
-    </p>
-    {% for cycle in summary.pace_at_lactate.cycle_order %}
-      {% set breakdown = summary.pace_at_lactate.by_cycle_workout_type[cycle] %}
-      {% if breakdown %}
-      <p><strong>{{ cycle }}</strong></p>
-      <table>
-        <tr>
-          <th>Workout type</th>
-          {% for target in ["2.0", "3.0", "4.0"] %}
-          <th>Pace @ {{ target }} mmol/L</th>
-          {% endfor %}
-        </tr>
-        {% for workout_type, entry in breakdown.items() %}
-        <tr>
-          <td>{{ workout_type }}</td>
-          {% for target in ["2.0", "3.0", "4.0"] %}
-          {% set target_entry = entry[target] %}
-          <td>
-            {% if target_entry.implausible %}
-            <span class="low-confidence">implausible -- not shown</span>
-            {% elif target_entry.pace_min_per_mi is not none %}
-            {{ target_entry.pace_min_per_mi | mmss }}/mi (95% CI {{ target_entry.ci_min_per_mi[0] | mmss }}-{{ target_entry.ci_min_per_mi[1] | mmss }}{% if target_entry.wide_uncertainty %}, capped{% endif %}, n_sessions={{ target_entry.n_observed_sessions }})
-            {% if target_entry.wide_uncertainty %}<span class="low-confidence"> -- very wide uncertainty</span>{% endif %}
-            {% if target_entry.unexpected_relationship %}<span class="low-confidence"> -- unexpected slope</span>{% endif %}
-            {% elif target_entry.out_of_range %}
-            outside this cycle's observed lactate range
-            {% elif target_entry.unsolvable %}
-            cannot solve
-            {% else %}
-            not enough data
-            {% endif %}
-          </td>
-          {% endfor %}
-        </tr>
-        {% endfor %}
-      </table>
-      {% endif %}
-    {% endfor %}
+    </table></div>
   </section>
 
   <section>
-    <h2>Pace at fixed lactate over time (per session)</h2>
-    <p class="section-note">
-      Same idea, per individual session over time -- this is what an actual fitness trend looks
-      like (running the same lactate concentration faster), rather than tracking lactate values
-      on their own.
+    <h2>What makes a session harder or easier</h2>
+    <p class="note">
+      Every condition is expressed as a pace cost: "+5 s/km" means the condition makes a rep feel like running
+      5 s/km faster. Hollow gray markers are what exercise physiology research would expect before seeing your data;
+      blue is the estimate after combining that with your data. Where the blue bar is much narrower than the gray one,
+      your data taught the model something; where they overlap almost fully, there isn't enough data on that factor
+      yet and the number is mostly the literature value.
     </p>
-    {{ figs.pace_at_lactate_trend | safe }}
-  </section>
-
-  <section>
-    <h2>Which factors move your lactate, and by how much</h2>
-    <p class="section-note">
-      This is the actual point of building a model instead of eyeballing the spreadsheet: not
-      just "pace at X mmol/L", but which of temperature, rest, surface, workout type etc.
-      actually matter, and how much. Each row compares two otherwise-identical predictions that
-      differ in exactly one thing, so the number is that one factor's effect, holding everything
-      else fixed. Numeric factors are compared per +1 standard deviation (a comparable unit
-      across differently-scaled things like heart rate vs. rest duration); categorical factors
-      per level vs. the most common level. "Partially pooled" means the estimate borrows strength
-      across the whole dataset (see the workout-type note above) rather than standing entirely on
-      its own. A wide interval crossing 0% means this factor's effect can't be pinned down from
-      the data you have -- that's a real answer ("we don't know"), not a missing one. Factors with
-      too little data to include at all (shoes, humidity, incline, ...) aren't listed here for the
-      same reason -- see the caveats section below for what got excluded and why.
-    </p>
-    <table>
-      <tr><th>Factor</th><th>Comparison</th><th>Effect on lactate</th></tr>
-      {% for effect in summary.covariate_effects %}
+    {{ figs.factors | safe }}
+    <div class="table-wrap"><table>
+      <tr><th>Factor</th><th class="num">Effect</th><th class="num">95% range</th><th class="num">Reps affected</th><th>Source</th><th>Why it matters</th></tr>
+      {% for f in summary.fitness.factors %}
       <tr>
-        <td>{{ effect.covariate }}{% if effect.partially_pooled %} <span class="section-note">(partially pooled)</span>{% endif %}</td>
-        <td>{{ effect.comparison }}</td>
-        <td>
-          {{ "+" if effect.pct_change > 0 }}{{ effect.pct_change }}%
-          (95% CI {{ "+" if effect.pct_change_ci[0] > 0 }}{{ effect.pct_change_ci[0] }}% to {{ "+" if effect.pct_change_ci[1] > 0 }}{{ effect.pct_change_ci[1] }}%)
-        </td>
+        <td>{{ f.label }}<br><span class="muted">{{ f.unit }}</span></td>
+        <td class="num">{{ f.median | signed_s }}</td>
+        <td class="num muted">{{ "%+.1f" | format(f.ci95[0]) }} to {{ "%+.1f" | format(f.ci95[1]) }}</td>
+        <td class="num">{{ f.n_reps_affected }}</td>
+        <td>{% if f.learned_from_data %}<span class="pill">learned from your data</span>{% else %}<span class="pill">mostly literature</span>{% endif %}</td>
+        <td class="muted">{{ f.rationale }}</td>
       </tr>
       {% endfor %}
-    </table>
+    </table></div>
   </section>
 
   <section>
-    <h2>Lactate response curves (confounder-adjusted cross-check)</h2>
-    <p class="section-note">
-      Raw lactate vs. pace by cycle, plus the statistical model described below. Supporting
-      evidence alongside the pace-at-lactate view above -- it additionally controls for
-      temperature, rest structure, surface, etc., at the cost of being harder to read directly.
+    <h2>Your lactate curve</h2>
+    {% set curve = summary.fitness.curve %}
+    <p class="note">
+      Your lactate rises about <strong>{{ curve.slope_pct_per_s_per_km.median }}% per s/km</strong> faster
+      (95%: {{ curve.slope_pct_per_s_per_km.lo95 }}–{{ curve.slope_pct_per_s_per_km.hi95 }}%). Going from 2.0 to 3.0 mmol/L
+      takes about <strong>{{ curve.s_per_km_for_1_5x_lactate.median }} s/km</strong> more speed
+      (95%: {{ curve.s_per_km_for_1_5x_lactate.lo95 }}–{{ curve.s_per_km_for_1_5x_lactate.hi95 }}).
+      This is why a simple lactate ÷ speed ratio misleads: running 5 s/km slower lowers lactate by roughly
+      {{ (100 * (1 - (2.718281828 ** (-0.05 * curve.slope_pct_per_s_per_km.median)))) | round | int }}% with no change in fitness at all.
+      The normalized pace in this report corrects for that.
     </p>
-    {{ figs.lactate_curve | safe }}
   </section>
 
   <section>
-    <h2>Cycle comparison (confounder-adjusted)</h2>
-    {{ figs.cycle_comparison | safe }}
-  </section>
-
-  <section>
-    <h2>Strongest evidence &amp; caveats</h2>
-    <p>Model used: <strong>{{ summary.evidence_and_caveats.model_used }}</strong></p>
-    <p>Covariates included: {{ summary.evidence_and_caveats.covariates_included | join(", ") if summary.evidence_and_caveats.covariates_included else "none" }}</p>
-    <p>Covariates excluded (insufficient data): {{ (summary.evidence_and_caveats.covariates_excluded_low_fill + summary.evidence_and_caveats.covariates_excluded_categorical_low_fill) | join(", ") if (summary.evidence_and_caveats.covariates_excluded_low_fill or summary.evidence_and_caveats.covariates_excluded_categorical_low_fill) else "none" }}</p>
-    <p class="section-note">
-      "Fill rate" below is the percentage of the {{ summary.data_summary.n_rows_total }} recorded
-      reps that actually had a value in that column (the rest were left blank). A column needs at
-      least a 60% fill rate to be used in the model above -- otherwise there isn't enough data to
-      estimate its effect reliably, and it's dropped rather than guessed at.
+    <h2>Sessions</h2>
+    <p class="note">
+      Most recent first. "Lactate ÷ speed" is the metric from the spreadsheet, for comparison. "Normalized" is the
+      session converted to 2.0 mmol/L under standard conditions. "Day form" is how far the session sat from your
+      trend that week (positive = a better day than expected).
     </p>
-    <table>
-      <tr><th>Column</th><th>% of reps with a recorded value</th></tr>
-      {% for col, rate in summary.evidence_and_caveats.missingness.items() %}
-      <tr><td>{{ col }}</td><td>{{ (rate * 100) | round(1) }}%</td></tr>
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Workout</th><th class="num">Reps</th><th class="num">Avg pace</th><th class="num">Avg lactate</th><th class="num">Lactate ÷ speed</th><th class="num">Normalized @ 2.0</th><th class="num">Day form</th></tr>
+      {% for s in sessions %}
+      <tr>
+        <td>{{ s.date }} <span class="muted">{{ s.period or "" }}</span></td>
+        <td>{{ s.workout_type or "–" }}<br><span class="muted">{{ s.surface or "" }}</span></td>
+        <td class="num">{{ s.n_reps }}</td>
+        <td class="num">{{ s.mean_pace_s_per_km | pace_short }}</td>
+        <td class="num">{{ "%.1f" | format(s.mean_lactate) }}</td>
+        <td class="num muted">{{ "%.2f" | format(s.mean_lactate / (1000 / s.mean_pace_s_per_km)) }}</td>
+        <td class="num">{{ s.normalized_pace["2.0"] | pace_short }}</td>
+        <td class="num">{{ s.form_s_per_km | signed_s }}</td>
+      </tr>
       {% endfor %}
-    </table>
-    <ul class="caveats">
-      {% if summary.evidence_and_caveats.low_confidence_cycles %}
-      <li class="low-confidence">Low-confidence cycles (few sessions): {{ summary.evidence_and_caveats.low_confidence_cycles | join(", ") }}</li>
-      {% endif %}
-      {% if summary.evidence_and_caveats.unexpected_relationship_cycles %}
-      <li class="low-confidence">
-        {{ summary.evidence_and_caveats.unexpected_relationship_cycles | join(", ") }}: this cycle's own
-        fitted lactate-vs-pace slope came out the wrong sign (predicting slower at higher lactate)
-        -- likely too little/too noisy data in that cycle for the model to pin down the
-        relationship reliably. Treat pace-at-lactate numbers for it with caution.
-      </li>
-      {% endif %}
-      {% if summary.evidence_and_caveats.implausible_estimates %}
-      <li class="low-confidence">
-        Omitted as implausible (the point estimate falls well outside the pace range you've
-        actually run in that cycle): {{ summary.evidence_and_caveats.implausible_estimates | join(", ") }}.
-        This means that cycle doesn't have enough data at that lactate level to extrapolate the
-        fitted line reliably -- not that your actual pace was ever that fast or slow.
-      </li>
-      {% endif %}
-      {% if summary.evidence_and_caveats.max_effort_rows_excluded %}
-      <li>
-        {{ summary.evidence_and_caveats.max_effort_rows_excluded }} row(s) logged as an all-out
-        effort ({{ summary.evidence_and_caveats.max_effort_workout_types | join(", ") }}) were excluded
-        from the curve fit -- a maximal effort is a different physiological regime (different lactate
-        kinetics, different measurement timing) from repeatable submaximal training, not a data error.
-        They're excluded by workout type, not by how high the lactate reading was, so a hard but
-        submaximal training session still counts.
-      </li>
-      {% endif %}
-      {% if summary.evidence_and_caveats.redundant_categoricals %}
-      <li>Excluded as redundant with another covariate already in the model (not a data gap):
-        {{ summary.evidence_and_caveats.redundant_categoricals | join(", ") }}.</li>
-      {% endif %}
-      <li>{{ summary.evidence_and_caveats.pace_deviation_caveat }}</li>
-      {% if summary.evidence_and_caveats.unlabeled_rows %}
-      <li>{{ summary.evidence_and_caveats.unlabeled_rows }} row(s) fell outside all defined training cycles and were excluded from cycle comparison.</li>
-      {% endif %}
-      {% if summary.evidence_and_caveats.inferred_rep_numbers %}
-      <li>{{ summary.evidence_and_caveats.inferred_rep_numbers }} row(s) had no rep number in the source data; it was inferred from row order.</li>
-      {% endif %}
-    </ul>
+    </table></div>
   </section>
 
   <section>
-    <h2>Conclusion</h2>
+    <h2>Data quality &amp; caveats</h2>
+    {% set dq = summary.data_quality %}
+    {% set diag = summary.fitness.diagnostics %}
     <ul>
-      {% for point in summary.conclusion.supporting_points %}
-      <li>{{ point }}</li>
-      {% endfor %}
+      <li>
+        Model fit: {{ diag.n_reps }} reps in {{ diag.n_sessions }} sessions.
+        {% if diag.converged %}Sampling converged (R-hat {{ diag.max_rhat }}, no divergences).
+        {% else %}<span class="warn">Sampling did not fully converge (R-hat {{ diag.max_rhat }}, {{ diag.n_divergences }} divergences) – treat numbers with caution.</span>{% endif %}
+      </li>
+      <li>Temperature was missing for {{ dq.temperature_imputed }} reps and filled in: treadmill as indoor temperature, outdoor with the average of your recorded temperatures in the same month.</li>
+      {% if dq.max_effort_rows_excluded %}
+      <li>{{ dq.max_effort_rows_excluded }} rep(s) logged as {{ dq.max_effort_workout_types | join(", ") }} were left out: an all-out effort is a different physiological situation from threshold training.</li>
+      {% endif %}
+      <li>Heart rate is intentionally not used as a factor: it's a result of intensity, not a condition, and correcting for it would remove part of the fitness signal itself.</li>
+      <li>One shared lactate-curve slope is assumed over the whole period. If the shape of your curve changes with fitness (not just its position), this simplification hides that.</li>
+      <li>A large treadmill effect can also come from belt-speed calibration: if the treadmill's displayed speed is off, the model absorbs that into the treadmill factor.</li>
     </ul>
+    <details>
+      <summary>How complete each column is</summary>
+      <div class="table-wrap"><table>
+        <tr><th>Column</th><th class="num">% of reps with a value</th></tr>
+        {% for col, rate in dq.fill_rates.items() %}
+        <tr><td>{{ col }}</td><td class="num">{{ (rate * 100) | round(1) }}%</td></tr>
+        {% endfor %}
+      </table></div>
+    </details>
   </section>
+</main>
 </body>
 </html>

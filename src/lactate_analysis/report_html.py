@@ -1,176 +1,193 @@
 """Render the structured JSON summary into a self-contained HTML report."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import plotly.graph_objects as go
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from .config import MILE_TO_KM
+
 TEMPLATE_DIR = Path(__file__).parent / "templates"
-_PALETTE = ["#4C78A8", "#F58518", "#54A24B", "#B279A2", "#E45756"]
+
+# Reference categorical palette slots 1-2 (validated CVD-safe as a pair) --
+# one fixed color per target lactate across every chart.
+TARGET_COLORS = {"2.0": "#2a78d6", "3.0": "#eb6834"}
+NEUTRAL = "#8a8986"
+PRIOR_COLOR = "#b5b4ae"
+TEXT_SECONDARY = "#52514e"
+CYCLE_SHADES = ["rgba(138,137,134,0.07)", "rgba(138,137,134,0.0)"]
 
 
-def _format_mmss(decimal_minutes: float | None) -> str:
-    """4.75 -> "4:45", not the meaningless decimal-minutes reading it replaces."""
-    if decimal_minutes is None:
+def _mmss(seconds: float | None) -> str:
+    if seconds is None or (isinstance(seconds, float) and math.isnan(seconds)):
         return "?"
-    total_seconds = round(decimal_minutes * 60)
-    minutes, seconds = divmod(total_seconds, 60)
-    return f"{minutes}:{seconds:02d}"
+    total = round(seconds)
+    minutes, secs = divmod(total, 60)
+    return f"{minutes}:{secs:02d}"
 
 
-def _lactate_curve_figure(summary: dict) -> go.Figure:
+def format_pace(s_per_km: float | None) -> str:
+    """195.0 -> "3:15/km (5:14/mi)"."""
+    if s_per_km is None:
+        return "?"
+    return f"{_mmss(s_per_km)}/km ({_mmss(s_per_km * MILE_TO_KM)}/mi)"
+
+
+def format_pace_short(s_per_km: float | None) -> str:
+    return f"{_mmss(s_per_km)}/km" if s_per_km is not None else "?"
+
+
+def format_signed_seconds(value: float | None) -> str:
+    if value is None:
+        return "?"
+    return f"{value:+.1f} s/km"
+
+
+def _pace_axis(fig: go.Figure, values: list[float]) -> None:
+    """Pace y-axis: faster at the top, mm:ss tick labels every 5 s/km."""
+    lo, hi = min(values), max(values)
+    start, end = 5 * math.floor(lo / 5), 5 * math.ceil(hi / 5)
+    ticks = list(range(start, end + 1, 5))
+    fig.update_yaxes(
+        autorange="reversed",
+        tickvals=ticks,
+        ticktext=[f"{_mmss(t)}/km" for t in ticks],
+        gridcolor="#ecebe8",
+        zeroline=False,
+    )
+
+
+def _nearest_target(mean_lactate: float, targets: list[str]) -> str:
+    return min(targets, key=lambda t: abs(math.log(mean_lactate / float(t))))
+
+
+def _fitness_trend_figure(summary: dict) -> go.Figure:
+    fitness = summary["fitness"]
+    targets = [str(t) for t in fitness["targets"]]
     fig = go.Figure()
-    for i, (label, data) in enumerate(summary["lactate_curves"].items()):
-        points = data["points"]
-        if not points:
-            continue
+    all_values: list[float] = []
+
+    for cycle_idx, cycle in enumerate(summary["cycles"]):
+        end = cycle["end_date"] or summary["data_summary"]["date_range"][1]
+        fig.add_vrect(
+            x0=cycle["start_date"], x1=end, fillcolor=CYCLE_SHADES[cycle_idx % 2], line_width=0,
+            annotation_text=cycle["label"], annotation_position="top left",
+            annotation_font=dict(size=11, color=TEXT_SECONDARY),
+        )
+
+    for target in targets:
+        color = TARGET_COLORS.get(target, NEUTRAL)
+        weeks = fitness["trend"][target]
+        x = [w["week_start"] for w in weeks]
+        all_values += [w["lo95"] for w in weeks] + [w["hi95"] for w in weeks]
+        for lo_key, hi_key, opacity in (("lo95", "hi95", 0.12), ("lo80", "hi80", 0.2)):
+            fig.add_trace(
+                go.Scatter(
+                    x=x + x[::-1],
+                    y=[w[hi_key] for w in weeks] + [w[lo_key] for w in weeks][::-1],
+                    fill="toself", fillcolor=_rgba(color, opacity), line=dict(width=0),
+                    hoverinfo="skip", showlegend=False, legendgroup=target,
+                )
+            )
         fig.add_trace(
             go.Scatter(
-                x=[p["pace_s_per_km"] for p in points],
-                y=[p["lactate_mmol"] for p in points],
-                mode="markers",
-                name=label,
-                marker=dict(color=_PALETTE[i % len(_PALETTE)]),
+                x=x, y=[w["median"] for w in weeks], mode="lines",
+                line=dict(color=color, width=2), name=f"Pace at {target} mmol/L (trend)", legendgroup=target,
+                customdata=[[format_pace(w["median"]), format_pace_short(w["lo95"]), format_pace_short(w["hi95"])] for w in weeks],
+                hovertemplate="Week of %{x}<br>%{customdata[0]}<br>95%: %{customdata[1]} – %{customdata[2]}<extra>"
+                + f"{target} mmol/L</extra>",
             )
         )
-    fig.update_xaxes(title="Pace (s/km)", autorange="reversed")
-    fig.update_yaxes(title="Lactate (mmol/L)")
-    fig.update_layout(title="Lactate response by cycle", template="plotly_white")
-    return fig
 
-
-def _cycle_comparison_figure(summary: dict) -> go.Figure:
-    cycles = [c for c in summary["cycle_comparison"]["cycles"] if not c.get("out_of_range")]
-    fig = go.Figure()
-    if cycles:
+        sessions = [s for s in fitness["sessions"] if _nearest_target(s["mean_lactate"], targets) == target]
         fig.add_trace(
-            go.Bar(
-                x=[c["cycle_label"] for c in cycles],
-                y=[c["predicted_lactate"] for c in cycles],
-                error_y=dict(
-                    type="data",
-                    symmetric=False,
-                    array=[c["ci"][1] - c["predicted_lactate"] for c in cycles],
-                    arrayminus=[c["predicted_lactate"] - c["ci"][0] for c in cycles],
-                ),
-                text=[
-                    f"n={c['n_sessions']}" + (" (low confidence)" if c.get("low_confidence") else "")
-                    for c in cycles
+            go.Scatter(
+                x=[s["date"] for s in sessions],
+                y=[s["normalized_pace"][target] for s in sessions],
+                mode="markers", name=f"Sessions near {target} mmol/L (normalized)", legendgroup=target,
+                marker=dict(color=color, size=8, line=dict(color="#fcfcfb", width=2)),
+                customdata=[
+                    [s["workout_type"] or "", format_pace_short(s["mean_pace_s_per_km"]), s["mean_lactate"],
+                     format_pace(s["normalized_pace"][target]), s["form_s_per_km"]]
+                    for s in sessions
                 ],
-                marker=dict(color=_PALETTE[0]),
+                hovertemplate=(
+                    "%{x} – %{customdata[0]}<br>Ran %{customdata[1]} at %{customdata[2]} mmol/L"
+                    "<br>Normalized: %{customdata[3]}<br>Day form vs. trend: %{customdata[4]:+.1f} s/km"
+                    f"<extra>{target} mmol/L</extra>"
+                ),
             )
         )
-    fig.update_yaxes(title="Predicted lactate at reference pace (mmol/L)")
+        all_values += [s["normalized_pace"][target] for s in sessions]
+
+    _pace_axis(fig, all_values)
+    fig.update_xaxes(gridcolor="#ecebe8")
     fig.update_layout(
-        title=f"Cycle comparison @ {summary['cycle_comparison']['reference_pace_min_per_mi']} min/mi",
-        template="plotly_white",
+        template="plotly_white", height=480, margin=dict(l=70, r=20, t=30, b=40),
+        legend=dict(orientation="h", y=-0.12), hovermode="closest",
+        plot_bgcolor="#fcfcfb", paper_bgcolor="#fcfcfb",
     )
     return fig
 
 
-def _pace_at_lactate_by_cycle_figure(summary: dict) -> go.Figure:
-    """Per cycle: model-based pace at fixed lactate concentrations (2/3/4 mmol/L).
-
-    This is the standard lactate-step-test readout -- how fast you can run at
-    a given metabolic stress level -- rather than the raw lactate value on
-    its own, which says nothing about fitness without the pace it came at.
-    Values come from inverting one fitted lactate-vs-pace line per cycle, so
-    they are guaranteed monotonic (higher target -> faster pace), unlike a
-    naive average across different sessions per target.
-    """
-    by_cycle = summary["pace_at_lactate"]["by_cycle"]
-    cycle_order = summary["pace_at_lactate"]["cycle_order"]
-    targets = ["2.0", "3.0", "4.0"]
-
+def _factor_figure(summary: dict) -> go.Figure:
+    factors = list(reversed(summary["fitness"]["factors"]))
+    labels = [f"{f['label']}<br><span style='font-size:11px;color:{TEXT_SECONDARY}'>{f['unit']}</span>" for f in factors]
     fig = go.Figure()
-    for i, target in enumerate(targets):
-        ys, errs_hi, errs_lo, texts = [], [], [], []
-        for c in cycle_order:
-            entry = by_cycle.get(c, {}).get(target, {})
-            # Implausible extrapolations (e.g. a negative or faster-than-world-
-            # record pace from a noisy/limited-data cycle) are left off the
-            # chart entirely rather than distorting its scale -- they're still
-            # shown as text in the table below with an explicit caveat.
-            pace = entry.get("pace_min_per_mi") if not entry.get("implausible") else None
-            ys.append(pace)
-            if pace is not None and entry.get("ci_min_per_mi"):
-                lo, hi = entry["ci_min_per_mi"]
-                errs_hi.append(hi - pace)
-                errs_lo.append(pace - lo)
-            else:
-                errs_hi.append(0)
-                errs_lo.append(0)
-            if entry.get("out_of_range"):
-                texts.append("outside this cycle's observed lactate range")
-            elif entry.get("unsolvable"):
-                texts.append("flat lactate-pace relationship, cannot solve")
-            elif entry.get("implausible"):
-                texts.append("implausible extrapolation, omitted -- see table below")
-            elif entry.get("unexpected_relationship"):
-                texts.append(f"n={entry.get('n_sessions')} sessions (unexpected slope sign -- treat with caution)")
-            else:
-                texts.append(f"n={entry.get('n_sessions')} sessions")
-        fig.add_trace(
-            go.Scatter(
-                x=cycle_order,
-                y=ys,
-                mode="markers+lines",
-                name=f"{target} mmol/L",
-                marker=dict(color=_PALETTE[i % len(_PALETTE)]),
-                error_y=dict(type="data", symmetric=False, array=errs_hi, arrayminus=errs_lo),
-                text=texts,
-                hovertemplate="%{x}<br>%{y} min/mi<br>%{text}<extra></extra>",
-            )
+    fig.add_trace(
+        go.Scatter(
+            x=[f["prior_mean"] for f in factors], y=labels, mode="markers", name="Literature prior (before your data)",
+            marker=dict(color="#fcfcfb", size=9, symbol="circle", line=dict(color=PRIOR_COLOR, width=2)),
+            error_x=dict(type="data", array=[1.96 * f["prior_sd"] for f in factors], color=PRIOR_COLOR, thickness=1),
+            hovertemplate="Prior: %{x:+.1f} s/km<extra></extra>",
         )
-    fig.update_yaxes(title="Pace (min/mi) -- lower is faster", autorange="reversed")
-    fig.update_layout(title="Pace at fixed lactate concentrations, per cycle (model-based)", template="plotly_white")
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[f["median"] for f in factors], y=labels, mode="markers", name="Estimate with your data (95%)",
+            marker=dict(color=TARGET_COLORS["2.0"], size=10, line=dict(color="#fcfcfb", width=2)),
+            error_x=dict(
+                type="data", symmetric=False,
+                array=[f["ci95"][1] - f["median"] for f in factors],
+                arrayminus=[f["median"] - f["ci95"][0] for f in factors],
+                color=TARGET_COLORS["2.0"], thickness=2,
+            ),
+            customdata=[[f["ci95"][0], f["ci95"][1], f["n_reps_affected"]] for f in factors],
+            hovertemplate="%{x:+.1f} s/km (95%: %{customdata[0]:+.1f} to %{customdata[1]:+.1f})"
+            "<br>%{customdata[2]} reps affected<extra></extra>",
+        )
+    )
+    fig.add_vline(x=0, line=dict(color=NEUTRAL, width=1))
+    fig.update_xaxes(title="← makes it easier · pace cost in s/km · makes it harder →", gridcolor="#ecebe8", zeroline=False)
+    fig.update_yaxes(gridcolor="#f3f2ef")
+    fig.update_layout(
+        template="plotly_white", height=90 + 46 * len(factors), margin=dict(l=20, r=20, t=20, b=60),
+        legend=dict(orientation="h", y=1.04, x=0, yanchor="bottom"),
+        plot_bgcolor="#fcfcfb", paper_bgcolor="#fcfcfb",
+    )
     return fig
 
 
-def _pace_at_lactate_trend_figure(summary: dict) -> go.Figure:
-    """Per session over time: pace at 2/3/4 mmol/L -- the actual fitness signal
-    (lactate alone says nothing; running the same lactate faster does)."""
-    points = summary["pace_at_lactate"]["trend_points"]
-    fig = go.Figure()
-    for i, target in enumerate([2.0, 3.0, 4.0]):
-        key = f"pace_at_{target}"
-        relevant = [p for p in points if p.get(key) is not None]
-        fig.add_trace(
-            go.Scatter(
-                x=[p["date"] for p in relevant],
-                y=[p[key] for p in relevant],
-                mode="markers",
-                name=f"{target} mmol/L",
-                marker=dict(color=_PALETTE[i % len(_PALETTE)], size=6),
-                text=[p["workout_type"] for p in relevant],
-                hovertemplate="%{x}<br>%{y} min/mi<br>%{text}<extra></extra>",
-            )
-        )
-    fig.update_yaxes(title="Pace (min/mi) -- lower is faster", autorange="reversed")
-    fig.update_xaxes(title="Date")
-    fig.update_layout(title="Pace at fixed lactate over time (per session)", template="plotly_white")
-    return fig
+def _rgba(hex_color: str, alpha: float) -> str:
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 def render(summary: dict, offline: bool = False) -> str:
     include_plotlyjs = True if offline else "cdn"
     figs_html = {
-        "lactate_curve": _lactate_curve_figure(summary).to_html(
-            full_html=False, include_plotlyjs=include_plotlyjs
-        ),
-        "cycle_comparison": _cycle_comparison_figure(summary).to_html(full_html=False, include_plotlyjs=False),
-        "pace_at_lactate_by_cycle": _pace_at_lactate_by_cycle_figure(summary).to_html(
-            full_html=False, include_plotlyjs=False
-        ),
-        "pace_at_lactate_trend": _pace_at_lactate_trend_figure(summary).to_html(
-            full_html=False, include_plotlyjs=False
-        ),
+        "fitness_trend": _fitness_trend_figure(summary).to_html(full_html=False, include_plotlyjs=include_plotlyjs),
+        "factors": _factor_figure(summary).to_html(full_html=False, include_plotlyjs=False),
     }
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=select_autoescape(["html"]))
-    env.filters["mmss"] = _format_mmss
+    env.filters["pace"] = format_pace
+    env.filters["pace_short"] = format_pace_short
+    env.filters["signed_s"] = format_signed_seconds
     template = env.get_template("report.html.j2")
-    return template.render(summary=summary, figs=figs_html)
+    sessions_latest_first = sorted(summary["fitness"]["sessions"], key=lambda s: s["date"], reverse=True)
+    return template.render(summary=summary, figs=figs_html, sessions=sessions_latest_first)
 
 
 def write_report(summary: dict, output_path: str | Path, offline: bool = False) -> None:

@@ -23,46 +23,15 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     "workout_type": ["workout type", "workout"],
 }
 
-# A numeric covariate is only offered to the statistical model if its fill
-# rate across all rows is at least this high; otherwise it is dropped rather
-# than imputed. Overridable via --min-covariate-fill-rate.
-MIN_COVARIATE_FILL_RATE = 0.6
-
-# Below this many usable sessions, the Bayesian hierarchical fit is skipped
-# (too little data for the sampler to do better than a simpler model) and the
-# pipeline goes straight to cluster-robust OLS.
-MIN_SESSIONS_FOR_BAYESIAN = 15
-
-# A per-cycle prediction is flagged "low_confidence" (not hidden) below this
-# many sessions in that cycle.
-LOW_CONFIDENCE_MIN_SESSIONS = 5
-
-# A *fixed*-effect categorical covariate level (e.g. surface="Treadmill")
-# backed by fewer rows than this is merged into "Other" before modeling
-# rather than getting its own unstable dummy coefficient. Does not apply to
-# workout_type, which gets a real partially-pooled (varying) intercept
-# instead of fixed dummies, so sparse levels are shrunk rather than merged.
-MIN_CATEGORY_COUNT = 5
-
-# A model-predicted pace-at-lactate is flagged "implausible" if it (or its
-# credible/confidence interval) falls more than this margin outside *that
-# cycle's own observed* pace range -- relative to what this specific athlete
-# has actually demonstrated, not an absolute human-population bound (which
-# is too loose to catch e.g. "4:14/mile" as wrong for a given recreational
-# runner even though it's a realistic pace for some humans). The margin is
-# max(fraction * observed range width, the floor below), so a cycle with a
-# very narrow observed pace range still gets a sane minimum margin.
-PLAUSIBLE_PACE_MARGIN_FRACTION = 0.25
-PLAUSIBLE_PACE_MARGIN_MIN_S_PER_KM = 20.0
-
 # Default cycle_label assigned to rows that fall outside every range defined
 # in cycles.yaml. These rows are excluded from cycle comparisons but kept in
 # the descriptive fitness-trend view.
 UNLABELED_CYCLE_LABEL = "Unlabeled"
 
-# Local, gitignored file holding the Google Sheets link (or an Excel path) used
-# when --input is omitted, so the data source isn't committed to the repo.
-DEFAULT_SOURCE_FILE = "data/source.txt"
+# Environment variable (usually set in the gitignored .env) holding the Google
+# Sheets link or Excel path used when --input is omitted. An env var rather
+# than a file so the same setting works unchanged on a hosted backend later.
+SOURCE_ENV_VAR = "LACTATE_SOURCE"
 
 DEFAULT_CYCLES_PATH = "data/cycles.yaml"
 DEFAULT_OUTPUT_HTML = "output/report.html"
@@ -70,18 +39,18 @@ DEFAULT_OUTPUT_JSON = "output/report.json"
 
 MILE_TO_KM = 1.60934
 
-# Standard fixed lactate reference points (mmol/L) used to report "how fast
-# can you run at this lactate concentration" per cycle -- the conventional
-# way lactate step-test results are reported (aerobic ~2.0, threshold ~4.0).
-TARGET_LACTATE_LEVELS = [2.0, 3.0, 4.0]
+# Lactate levels (mmol/L) the fitness trend is reported at: the double-
+# threshold targets actually trained at (AM ~2.0, PM ~3.0). 4.0 is left out on
+# purpose -- training data almost never reaches it, so any number there would
+# be extrapolation rather than measurement.
+TARGET_LACTATE_LEVELS = [2.0, 3.0]
 
 # Workout types that represent an all-out/maximal effort (a race), not a
 # repeatable submaximal training structure. A maximal effort is a genuinely
 # different physiological regime (different lactate kinetics, different
 # measurement timing relative to the effort) -- these rows are excluded from
-# the pace-at-lactate curve fit, not because the values are wrong, but
-# because they don't belong on the same submaximal training curve. They stay
-# in the raw data and are reported separately as an observed maximum. This is
-# a workout_type-based exclusion, not a lactate-value cutoff: a hard,
+# the fitness model, not because the values are wrong, but because they don't
+# belong on the same submaximal training curve. This is a workout_type-based
+# exclusion, not a lactate-value cutoff: a hard,
 # fast *training* session (any other workout_type) still belongs in the fit.
 MAX_EFFORT_WORKOUT_TYPES = ["Race"]

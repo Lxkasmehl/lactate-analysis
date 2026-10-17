@@ -2,225 +2,151 @@
 
 This dict is the hand-off contract for later phases too (an LLM
 interpretation layer, a future web backend) -- nothing downstream of this
-function should need to touch the raw DataFrame again.
+function should need to touch the raw DataFrame or posterior draws again.
+All paces are in seconds per km; the report converts for display.
 """
 from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 
-from .config import MAX_EFFORT_WORKOUT_TYPES, MILE_TO_KM
+from .config import MAX_EFFORT_WORKOUT_TYPES
+
+# Comparisons for the status tile: "now" vs. this many weeks earlier.
+COMPARISON_WEEKS = {"8 weeks ago": 8, "a year ago": 52}
+
+# A change counts as real when the posterior is at least this sure of its
+# direction; otherwise it's reported as "no clear change".
+CLEAR_CHANGE_PROBABILITY = 0.8
 
 
-def _pace_s_per_km_to_min_per_mi(value: float | None) -> float | None:
-    if value is None:
-        return None
-    return round(value * MILE_TO_KM / 60, 2)
-
-
-def _format_pace_at_lactate_entry(entry: dict) -> dict:
-    """Convert one model.predict_pace_at_lactate() result to display units.
-
-    Always sets pace_min_per_mi/ci_min_per_mi (to None if not applicable) so
-    every entry has the same keys -- a key that's simply absent reads back as
-    Jinja's Undefined in the template, not None, which silently breaks an
-    "is not none" check.
-    """
-    formatted = dict(entry)
-    ci = entry.get("ci_s_per_km")
-    formatted["pace_min_per_mi"] = _pace_s_per_km_to_min_per_mi(entry.get("pace_s_per_km"))
-    formatted["ci_min_per_mi"] = (
-        [_pace_s_per_km_to_min_per_mi(ci[0]), _pace_s_per_km_to_min_per_mi(ci[1])] if ci else None
-    )
-    return formatted
-
-
-def _format_pace_at_lactate(pace_at_lactate_result: dict, cycle_order: list[str]) -> dict:
-    by_cycle = {
-        cycle_label: {target: _format_pace_at_lactate_entry(entry) for target, entry in targets.items()}
-        for cycle_label, targets in pace_at_lactate_result["by_cycle"].items()
+def _interval(values: np.ndarray) -> dict:
+    return {
+        "median": round(float(np.median(values)), 1),
+        "lo95": round(float(np.percentile(values, 2.5)), 1),
+        "hi95": round(float(np.percentile(values, 97.5)), 1),
     }
-    by_cycle_workout_type = {
-        cycle_label: {
-            workout_type: {target: _format_pace_at_lactate_entry(entry) for target, entry in targets.items()}
-            for workout_type, targets in breakdown.items()
-        }
-        for cycle_label, breakdown in pace_at_lactate_result["by_cycle_workout_type"].items()
-    }
-    return {"cycle_order": cycle_order, "by_cycle": by_cycle, "by_cycle_workout_type": by_cycle_workout_type}
 
 
-def _format_trend_points(trend_points: list[dict]) -> list[dict]:
-    formatted = []
-    for point in trend_points:
-        converted = {
-            "date": point["date"],
-            "cycle_label": point["cycle_label"],
-            "workout_type": point["workout_type"],
-        }
-        for key, value in point.items():
-            if key.startswith("pace_at_"):
-                converted[key] = _pace_s_per_km_to_min_per_mi(value)
-        formatted.append(converted)
-    return formatted
+def _change(diff_draws: np.ndarray) -> dict:
+    """diff = later pace - earlier pace (s/km); negative means faster."""
+    # Rounded before the verdict so the shown percentage and the verdict agree.
+    prob_faster = round(float(np.mean(diff_draws < 0)), 2)
+    if prob_faster >= CLEAR_CHANGE_PROBABILITY:
+        verdict = "faster"
+    elif prob_faster <= 1 - CLEAR_CHANGE_PROBABILITY:
+        verdict = "slower"
+    else:
+        verdict = "no clear change"
+    return {**_interval(diff_draws), "prob_faster": prob_faster, "verdict": verdict}
 
 
-def _trend_direction(cycle_predictions: list[dict]) -> str:
-    usable = [c for c in cycle_predictions if not c.get("out_of_range")]
-    if len(usable) < 2:
-        return "insufficient_data"
-    first, last = usable[0], usable[-1]
-    if last["predicted_lactate"] < first["predicted_lactate"] - 0.05:
-        return "improving"
-    if last["predicted_lactate"] > first["predicted_lactate"] + 0.05:
-        return "declining"
-    return "stable"
+def _status(fitness_summary: dict) -> dict:
+    fitness = fitness_summary["_fitness_draws"]
+    slope = fitness_summary["_slope_draws"]
+    week_starts = fitness_summary["_week_starts"]
+    trend_2 = fitness_summary["trend"][str(fitness_summary["reference_lactate"])]
+    last_idx = max(i for i, w in enumerate(trend_2) if w["has_data"])
 
+    current = {}
+    for target in fitness_summary["targets"]:
+        offset = np.log(target / fitness_summary["reference_lactate"]) / slope
+        current[str(target)] = _interval(fitness[:, last_idx] + offset)
 
-def _build_conclusion(trend_direction: str, cycle_predictions: list[dict], validation_report: dict) -> dict:
-    headline = {
-        "improving": (
-            "Your estimated lactate response at a standardized pace has decreased across "
-            "training cycles, consistent with improving fitness."
-        ),
-        "declining": (
-            "Your estimated lactate response at a standardized pace has increased across training cycles."
-        ),
-        "stable": "Your estimated lactate response at a standardized pace has stayed roughly stable across cycles.",
-        "insufficient_data": "Not enough comparable in-range cycles to assess a fitness trend yet.",
-    }[trend_direction]
-
-    supporting_points = []
-    for c in cycle_predictions:
-        if c.get("out_of_range"):
-            supporting_points.append(
-                f"{c['cycle_label']}: reference pace outside this cycle's observed range "
-                f"({c['pace_range_s_per_km'][0]}-{c['pace_range_s_per_km'][1]} s/km) -- excluded from comparison."
-            )
-        else:
-            note = " (low confidence)" if c.get("low_confidence") else ""
-            supporting_points.append(
-                f"{c['cycle_label']}: predicted lactate {c['predicted_lactate']} mmol/L "
-                f"(95% CI {c['ci'][0]}-{c['ci'][1]}, n={c['n_sessions']} sessions){note}"
-            )
-
-    if validation_report["covariates_excluded_low_fill"]:
-        supporting_points.append(
-            "Excluded from the model due to insufficient data: "
-            + ", ".join(validation_report["covariates_excluded_low_fill"])
+    comparisons = []
+    for label, weeks in COMPARISON_WEEKS.items():
+        earlier_idx = last_idx - weeks
+        if earlier_idx < 0:
+            continue
+        comparisons.append(
+            {
+                "label": label,
+                "week_start": week_starts[earlier_idx],
+                # The fitted slope is shared over time, so the change is the
+                # same at every target lactate.
+                **_change(fitness[:, last_idx] - fitness[:, earlier_idx]),
+            }
         )
+    return {"as_of_week": week_starts[last_idx], "current": current, "comparisons": comparisons}
 
-    return {"headline": headline, "supporting_points": supporting_points}
+
+def _cycle_summaries(fitness_summary: dict, cycle_defs: list[dict]) -> list[dict]:
+    """Average standardized fitness over the weeks of each cycle that have data."""
+    fitness = fitness_summary["_fitness_draws"]
+    week_starts = pd.to_datetime(fitness_summary["_week_starts"])
+    has_data = np.array([w["has_data"] for w in fitness_summary["trend"][str(fitness_summary["reference_lactate"])]])
+    sessions = pd.DataFrame(fitness_summary["sessions"])
+    sessions["date"] = pd.to_datetime(sessions["date"])
+
+    summaries: list[dict] = []
+    previous_draws = None
+    for cycle in cycle_defs:
+        in_cycle = (week_starts >= cycle["start_date"] - pd.Timedelta(days=6)) & (week_starts <= cycle["end_date"])
+        weeks = np.where(in_cycle & has_data)[0]
+        n_sessions = int(sessions["date"].between(cycle["start_date"], cycle["end_date"]).sum())
+        entry = {
+            "label": cycle["label"],
+            "start_date": str(cycle["start_date"].date()),
+            "end_date": None if cycle["end_date"] == pd.Timestamp.max else str(cycle["end_date"].date()),
+            "n_sessions": n_sessions,
+            "pace_at_reference": None,
+            "change_vs_previous": None,
+        }
+        if len(weeks):
+            draws = fitness[:, weeks].mean(axis=1)
+            entry["pace_at_reference"] = _interval(draws)
+            if previous_draws is not None:
+                entry["change_vs_previous"] = _change(draws - previous_draws)
+            previous_draws = draws
+        summaries.append(entry)
+    return summaries
+
+
+def _headline(status: dict) -> str:
+    recent = next((c for c in status["comparisons"] if c["label"] == "8 weeks ago"), None)
+    if recent is None:
+        return "Not enough history yet to judge a recent trend."
+    if recent["verdict"] == "faster":
+        return (
+            f"You're getting fitter: at the same lactate you now run about {abs(recent['median']):.0f} s/km "
+            f"faster than 8 weeks ago ({recent['prob_faster']:.0%} probability of a real improvement)."
+        )
+    if recent["verdict"] == "slower":
+        return (
+            f"Your standardized pace is about {abs(recent['median']):.0f} s/km slower than 8 weeks ago "
+            f"({1 - recent['prob_faster']:.0%} probability this is a real decline, not noise)."
+        )
+    return "No clear change in your standardized fitness over the last 8 weeks."
 
 
 def build_summary(
     df: pd.DataFrame,
     validation_report: dict,
-    analysis: dict,
-    reference_pace_min_per_mi: float,
-    trend_points: list[dict],
+    fitness_summary: dict,
+    cycle_defs: list[dict],
 ) -> dict:
-    cycle_predictions = analysis["cycle_predictions"]
-    trend_direction = _trend_direction(cycle_predictions)
-    latest = cycle_predictions[-1] if cycle_predictions else None
-    latest_usable = latest if latest and not latest.get("out_of_range") else None
+    status = _status(fitness_summary)
+    max_effort_rows = int(df["workout_type"].isin(MAX_EFFORT_WORKOUT_TYPES).sum()) if "workout_type" in df else 0
 
-    cycle_order = analysis["cycle_order"]
-    pace_at_lactate_summary = _format_pace_at_lactate(analysis["pace_at_lactate"], cycle_order)
-    pace_at_lactate_summary["trend_points"] = _format_trend_points(trend_points)
-
-    latest_cycle_label = cycle_order[-1] if cycle_order else None
-    pace_at_3mmol_latest = None
-    if latest_cycle_label:
-        entry = pace_at_lactate_summary["by_cycle"].get(latest_cycle_label, {}).get("3.0", {})
-        if not entry.get("implausible"):
-            pace_at_3mmol_latest = entry.get("pace_min_per_mi")
-
-    unexpected_relationship_cycles = sorted(
-        {
-            cycle_label
-            for cycle_label, targets in pace_at_lactate_summary["by_cycle"].items()
-            for entry in targets.values()
-            if entry.get("unexpected_relationship")
-        }
-    )
-    implausible_estimates = [
-        f"{cycle_label} @ {target} mmol/L"
-        for cycle_label, targets in pace_at_lactate_summary["by_cycle"].items()
-        for target, entry in targets.items()
-        if entry.get("implausible")
-    ]
-
-    curves: dict[str, dict] = {}
-    for label in df["cycle_label"].dropna().unique():
-        sub = df[df["cycle_label"] == label]
-        curves[label] = {
-            "points": [
-                {"pace_s_per_km": round(float(p), 2), "lactate_mmol": round(float(l), 3)}
-                for p, l in zip(sub["pace_s_per_km"], sub["lactate_mmol"])
-                if pd.notna(p) and pd.notna(l)
-            ]
-        }
-
-    surface_mix: dict[str, dict[str, float]] = {}
-    for label, sub in df.groupby("cycle_label"):
-        counts = sub["surface"].fillna("unknown").value_counts(normalize=True)
-        surface_mix[str(label)] = {str(k): round(float(v), 3) for k, v in counts.items()}
-
-    max_effort_mask = df["workout_type"].isin(MAX_EFFORT_WORKOUT_TYPES) if "workout_type" in df.columns else None
-    max_effort_rows_excluded = int(max_effort_mask.sum()) if max_effort_mask is not None else 0
-
-    # Largest-magnitude effects first -- "which factors matter most", not
-    # just an unordered dump of every covariate the model happened to use.
-    covariate_effects = sorted(
-        analysis.get("covariate_effects", []), key=lambda e: abs(e["pct_change"]), reverse=True
-    )
-
+    public_fitness = {k: v for k, v in fitness_summary.items() if not k.startswith("_")}
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "data_summary": {
             "n_rows_total": validation_report["n_rows_total"],
-            "n_rows_modeled": validation_report["n_rows_modeled"],
-            "n_sessions": validation_report["n_sessions"],
+            "n_rows_modeled": public_fitness["diagnostics"]["n_reps"],
+            "n_sessions": public_fitness["diagnostics"]["n_sessions"],
             "date_range": validation_report["date_range"],
         },
-        "current_status": {
-            "latest_cycle": latest["cycle_label"] if latest else None,
-            "predicted_lactate_at_ref_pace": latest_usable["predicted_lactate"] if latest_usable else None,
-            "ci": latest_usable["ci"] if latest_usable else None,
-            "reference_pace_min_per_mi": round(reference_pace_min_per_mi, 2),
-            "trend_direction": trend_direction,
-            "pace_at_3mmol_latest_cycle_min_per_mi": pace_at_3mmol_latest,
-        },
-        "lactate_curves": curves,
-        "cycle_comparison": {
-            "reference_pace_min_per_mi": round(reference_pace_min_per_mi, 2),
-            "cycles": cycle_predictions,
-        },
-        "pace_at_lactate": pace_at_lactate_summary,
-        "covariate_effects": covariate_effects,
-        "evidence_and_caveats": {
-            "model_used": analysis["method"],
-            "covariates_included": analysis["covariates_used"],
-            "covariates_excluded_low_fill": validation_report["covariates_excluded_low_fill"],
-            "covariates_excluded_categorical_low_fill": validation_report["covariates_excluded_categorical_low_fill"],
-            "missingness": validation_report["covariate_fill_rates"],
-            "low_confidence_cycles": [c["cycle_label"] for c in cycle_predictions if c.get("low_confidence")],
-            "pace_deviation_caveat": (
-                "pace_deviation_pct is a heuristic proxy based on prior reps in the same session, "
-                "not a true target-pace comparison -- there is no target-pace column in the source data."
-            ),
-            "max_effort_rows_excluded": max_effort_rows_excluded,
+        "headline": _headline(status),
+        "status": status,
+        "cycles": _cycle_summaries(fitness_summary, cycle_defs),
+        "fitness": public_fitness,
+        "data_quality": {
+            "fill_rates": validation_report["covariate_fill_rates"],
+            "temperature_imputed": public_fitness["diagnostics"]["n_temperature_imputed"],
+            "max_effort_rows_excluded": max_effort_rows,
             "max_effort_workout_types": MAX_EFFORT_WORKOUT_TYPES,
-            "redundant_categoricals": [
-                f"{dropped} (redundant with {kept})" for dropped, kept in analysis.get("redundant_categoricals", [])
-            ],
-            "unlabeled_rows": validation_report["unlabeled_rows"],
-            "inferred_rep_numbers": validation_report["inferred_rep_numbers"],
-            "surface_mix_by_cycle": surface_mix,
-            "unexpected_relationship_cycles": unexpected_relationship_cycles,
-            "implausible_estimates": implausible_estimates,
         },
-        "conclusion": _build_conclusion(trend_direction, cycle_predictions, validation_report),
     }
