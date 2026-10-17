@@ -234,6 +234,7 @@ def render(summary: dict, offline: bool = False) -> str:
         "heart_rate_planner": (summary.get("heart_rate") or {}).get("planner"),
         "sessions": summary["fitness"]["sessions"],
         "similar": summary["similar_sessions"],
+        "form_sd": summary["fitness"]["day_to_day_form_sd_s_per_km"],
     }
     # "</" inside inline JSON could close the <script> tag early.
     interactive_json = json.dumps(interactive).replace("</", "<\\/")

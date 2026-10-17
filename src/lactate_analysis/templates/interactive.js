@@ -209,6 +209,7 @@
     picker.insertAdjacentHTML("beforeend", `<option value="${esc(s.session_id)}">${esc(s.date)} ${esc(s.period || "")} · ${esc(s.workout_type || "")}</option>`)
   );
   const ref = P.reference_lactate.toFixed(1);
+  const SAME_THRESHOLD = 3; // s/km
 
   function renderSimilar() {
     const current = byId[picker.value];
@@ -221,12 +222,12 @@
       out.innerHTML = html + `<p class="muted">No earlier sessions to compare with.</p>`;
       return;
     }
+    // Verdict levels are explained in the legend under the table.
     const verdict = (m) => {
-      const modelPart = Math.abs(m.conditions_correction) + Math.abs(m.curve_correction);
-      const sure = Math.abs(m.normalized_diff) > 3 && Math.abs(m.normalized_diff) > modelPart / 2;
-      if (Math.abs(m.normalized_diff) <= 3) return "about the same";
+      if (Math.abs(m.normalized_diff) <= SAME_THRESHOLD) return "about the same";
       const dir = m.normalized_diff < 0 ? "better" : "worse";
-      return sure ? `${dir} this time` : `${dir}, but mostly via model corrections`;
+      const corrections = Math.abs(m.conditions_correction) + Math.abs(m.curve_correction);
+      return corrections <= Math.abs(m.normalized_diff) ? `clearly ${dir}` : `probably ${dir}`;
     };
     html += `<div class="table-wrap"><table><tr><th>Earlier session</th><th class="num">Ran</th><th class="num">Raw pace Δ</th>
       <th class="num">Conditions Δ</th><th class="num">Lactate-curve Δ</th><th class="num">Normalized Δ</th><th>Verdict</th></tr>` +
@@ -242,6 +243,16 @@
         )
         .join("") +
       `</table></div>`;
+    html += `<ul class="note legend">
+      <li><strong>about the same</strong>: within ±${SAME_THRESHOLD} s/km after correction.</li>
+      <li><strong>clearly better / worse</strong>: the difference is bigger than all the model's corrections together, so even
+        if the model were somewhat off, the verdict would hold.</li>
+      <li><strong>probably better / worse</strong>: the raw numbers alone don't show it; the verdict comes mainly from the
+        corrections. Typical case: you ran a bit slower but with clearly lower lactate, and the lactate curve says that
+        trade is worth more than the pace you gave up. If the curve or a condition effect is a bit off, this one could flip.</li>
+      <li>Single sessions also vary about ±${Math.round(data.form_sd)} s/km from day to day (sleep, fatigue, measurement), so one
+        comparison is a hint; a pattern over several sessions is what counts.</li>
+    </ul>`;
     out.innerHTML = html;
   }
   picker.addEventListener("input", renderSimilar);
